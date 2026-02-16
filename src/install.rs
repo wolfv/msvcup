@@ -1,18 +1,17 @@
 use crate::arch::Arch;
 use crate::lock_file::LockFile;
 use crate::lockfile_parse::{
-    check_lock_file_pkgs, parse_lock_file_payload, write_payload,
-    LockFilePayloadKind,
+    LockFilePayloadKind, check_lock_file_pkgs, parse_lock_file_payload, write_payload,
 };
-use crate::manifest::{fetch, MsvcupDir};
+use crate::manifest::{MsvcupDir, fetch};
 use crate::packages::{
-    get_install_pkg, get_lock_file_url_kind, get_packages, identify_payload, InstallPkgKind,
-    LockFileUrlKind, ManifestUpdate, MsvcupPackage, MsvcupPackageKind, Packages, PayloadId,
+    InstallPkgKind, LockFileUrlKind, ManifestUpdate, MsvcupPackage, MsvcupPackageKind, Packages,
+    PayloadId, get_install_pkg, get_lock_file_url_kind, get_packages, identify_payload,
 };
 use crate::sha::Sha256;
 use crate::util::{basename_from_url, insert_sorted};
 use crate::zip_extract::{self, ZipKind};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::cmp::Ordering;
 use std::fs;
 use std::io::{BufWriter, Write};
@@ -122,8 +121,8 @@ fn install_from_lock_file(
         let parsed = parse_lock_file_payload(lock_file_path, 0, line)?;
 
         // Skip payloads for non-native architectures
-        if let Some(host_arch_limit) = parsed.host_arch_limit() {
-            if Arch::native() != Some(host_arch_limit) {
+        if let Some(host_arch_limit) = parsed.host_arch_limit()
+            && Arch::native() != Some(host_arch_limit) {
                 let name = basename_from_url(&parsed.url_decoded);
                 log::info!(
                     "skipping payload '{}' arch {} != host arch {:?}",
@@ -133,7 +132,6 @@ fn install_from_lock_file(
                 );
                 continue;
             }
-        }
 
         match &parsed.url_kind {
             LockFilePayloadKind::TopLevel(payload_msvcup_pkg) => {
@@ -200,6 +198,7 @@ fn cache_entry_path(cache_dir: &str, sha256: &Sha256, name: &str) -> PathBuf {
     PathBuf::from(cache_dir).join(basename)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn install_payload(
     client: &reqwest::blocking::Client,
     install_dir_path: &Path,
@@ -210,12 +209,19 @@ fn install_payload(
     strip_root_dir: bool,
     cabs: &str,
 ) -> Result<()> {
-    let url_kind = get_lock_file_url_kind(url_decoded)
-        .ok_or_else(|| anyhow::anyhow!("unable to determine install kind from URL '{}'", url_decoded))?;
+    let url_kind = get_lock_file_url_kind(url_decoded).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unable to determine install kind from URL '{}'",
+            url_decoded
+        )
+    })?;
 
     let cache_path = cache_entry_path(cache_dir, sha256, basename_from_url(url_decoded));
 
-    let installed_basename = format!("{}.files", cache_path.file_name().unwrap().to_str().unwrap());
+    let installed_basename = format!(
+        "{}.files",
+        cache_path.file_name().unwrap().to_str().unwrap()
+    );
     let installed_manifest_path = install_dir_path.join("install").join(&installed_basename);
 
     if installed_manifest_path.exists() {
@@ -233,8 +239,11 @@ fn install_payload(
             continue;
         }
         let parsed = parse_lock_file_payload(lock_file_path, 0, line)?;
-        let cab_cache_path =
-            cache_entry_path(cache_dir, &parsed.sha256, basename_from_url(&parsed.url_decoded));
+        let cab_cache_path = cache_entry_path(
+            cache_dir,
+            &parsed.sha256,
+            basename_from_url(&parsed.url_decoded),
+        );
         fetch_payload(
             client,
             cache_dir,
@@ -297,7 +306,10 @@ fn install_payload(
                     &mut manifest_file,
                 )?;
             } else {
-                log::warn!("MSI installation is only supported on Windows, skipping '{}'", url_decoded);
+                log::warn!(
+                    "MSI installation is only supported on Windows, skipping '{}'",
+                    url_decoded
+                );
             }
         }
         LockFileUrlKind::Cab => unreachable!(),
@@ -393,8 +405,11 @@ fn install_msi(
         }
         let parsed = parse_lock_file_payload(lock_file_path, 0, line)?;
         if let LockFilePayloadKind::Cab(cab_path) = &parsed.url_kind {
-            let cab_cache_path =
-                cache_entry_path(cache_dir, &parsed.sha256, basename_from_url(&parsed.url_decoded));
+            let cab_cache_path = cache_entry_path(
+                cache_dir,
+                &parsed.sha256,
+                basename_from_url(&parsed.url_decoded),
+            );
             let dest = installer_path.join(cab_path.trim());
             if let Some(parent) = dest.parent() {
                 fs::create_dir_all(parent)?;
@@ -460,8 +475,7 @@ fn install_dir_recursive(
     root_exclude: &str,
     manifest_file: &mut fs::File,
 ) -> Result<()> {
-    for entry in walkdir::WalkDir::new(source_dir).into_iter().flatten()
-    {
+    for entry in walkdir::WalkDir::new(source_dir).into_iter().flatten() {
         let rel_path = entry.path().strip_prefix(source_dir)?;
         if rel_path.to_str() == Some(root_exclude) {
             continue;
@@ -517,10 +531,7 @@ enum FinishKind {
 fn query_install_version(finish_kind: FinishKind, install_path: &Path) -> Result<String> {
     let query_path = match finish_kind {
         FinishKind::Msvc => install_path.join("VC").join("Tools").join("MSVC"),
-        FinishKind::Sdk => install_path
-            .join("Windows Kits")
-            .join("10")
-            .join("Include"),
+        FinishKind::Sdk => install_path.join("Windows Kits").join("10").join("Include"),
     };
 
     let mut version_entry: Option<String> = None;
@@ -547,7 +558,11 @@ fn query_install_version(finish_kind: FinishKind, install_path: &Path) -> Result
     })
 }
 
-fn generate_vcvars_bat(finish_kind: FinishKind, install_version: &str, target_arch: Arch) -> String {
+fn generate_vcvars_bat(
+    finish_kind: FinishKind,
+    install_version: &str,
+    target_arch: Arch,
+) -> String {
     let native_arch = Arch::native().unwrap_or(Arch::X64);
     match finish_kind {
         FinishKind::Msvc => format!(
@@ -615,12 +630,14 @@ pub fn update_lock_file(
                         {
                             let range = pkgs.payload_range_from_pkg_index(pkg_index);
                             for pi in range {
-                                insert_sorted(&mut install_payloads, (msvcup_pkg.clone(), pi), |a, b| {
-                                    match MsvcupPackage::order(&a.0, &b.0) {
+                                insert_sorted(
+                                    &mut install_payloads,
+                                    (msvcup_pkg.clone(), pi),
+                                    |a, b| match MsvcupPackage::order(&a.0, &b.0) {
                                         Ordering::Equal => a.1.cmp(&b.1),
                                         other => other,
-                                    }
-                                });
+                                    },
+                                );
                             }
                             break;
                         }
@@ -633,12 +650,14 @@ pub fn update_lock_file(
                         {
                             let range = pkgs.payload_range_from_pkg_index(pkg_index);
                             for pi in range {
-                                insert_sorted(&mut install_payloads, (msvcup_pkg.clone(), pi), |a, b| {
-                                    match MsvcupPackage::order(&a.0, &b.0) {
+                                insert_sorted(
+                                    &mut install_payloads,
+                                    (msvcup_pkg.clone(), pi),
+                                    |a, b| match MsvcupPackage::order(&a.0, &b.0) {
                                         Ordering::Equal => a.1.cmp(&b.1),
                                         other => other,
-                                    }
-                                });
+                                    },
+                                );
                             }
                             break;
                         }
@@ -651,12 +670,14 @@ pub fn update_lock_file(
                         {
                             let range = pkgs.payload_range_from_pkg_index(pkg_index);
                             for pi in range {
-                                insert_sorted(&mut install_payloads, (msvcup_pkg.clone(), pi), |a, b| {
-                                    match MsvcupPackage::order(&a.0, &b.0) {
+                                insert_sorted(
+                                    &mut install_payloads,
+                                    (msvcup_pkg.clone(), pi),
+                                    |a, b| match MsvcupPackage::order(&a.0, &b.0) {
                                         Ordering::Equal => a.1.cmp(&b.1),
                                         other => other,
-                                    }
-                                });
+                                    },
+                                );
                             }
                             break;
                         }
@@ -669,12 +690,14 @@ pub fn update_lock_file(
                         {
                             let range = pkgs.payload_range_from_pkg_index(pkg_index);
                             for pi in range {
-                                insert_sorted(&mut install_payloads, (msvcup_pkg.clone(), pi), |a, b| {
-                                    match MsvcupPackage::order(&a.0, &b.0) {
+                                insert_sorted(
+                                    &mut install_payloads,
+                                    (msvcup_pkg.clone(), pi),
+                                    |a, b| match MsvcupPackage::order(&a.0, &b.0) {
                                         Ordering::Equal => a.1.cmp(&b.1),
                                         other => other,
-                                    }
-                                });
+                                    },
+                                );
                             }
                             break;
                         }
@@ -687,12 +710,14 @@ pub fn update_lock_file(
                         {
                             let range = pkgs.payload_range_from_pkg_index(pkg_index);
                             for pi in range {
-                                insert_sorted(&mut install_payloads, (msvcup_pkg.clone(), pi), |a, b| {
-                                    match MsvcupPackage::order(&a.0, &b.0) {
+                                insert_sorted(
+                                    &mut install_payloads,
+                                    (msvcup_pkg.clone(), pi),
+                                    |a, b| match MsvcupPackage::order(&a.0, &b.0) {
                                         Ordering::Equal => a.1.cmp(&b.1),
                                         other => other,
-                                    }
-                                });
+                                    },
+                                );
                             }
                             break;
                         }

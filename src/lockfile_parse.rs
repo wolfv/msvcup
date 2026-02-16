@@ -1,8 +1,6 @@
-use crate::packages::{
-    get_lock_file_url_kind, LockFileUrlKind, MsvcupPackage, MsvcupPackageKind,
-};
+use crate::packages::{LockFileUrlKind, MsvcupPackage, MsvcupPackageKind, get_lock_file_url_kind};
 use crate::sha::Sha256;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::cmp::Ordering;
 
 #[derive(Debug)]
@@ -50,24 +48,22 @@ pub fn parse_lock_file_payload(
     lineno: u32,
     line: &str,
 ) -> Result<LockFilePayload> {
-    let msvcup_pkg_end = line
-        .find('|')
-        .ok_or_else(|| anyhow::anyhow!("{}:{}: line has no '|' separator", lock_file_path, lineno))?;
+    let msvcup_pkg_end = line.find('|').ok_or_else(|| {
+        anyhow::anyhow!("{}:{}: line has no '|' separator", lock_file_path, lineno)
+    })?;
     let msvcup_pkg_str = &line[..msvcup_pkg_end];
     let maybe_msvcup_pkg = if msvcup_pkg_str.is_empty() {
         None
     } else {
-        Some(
-            MsvcupPackage::from_string(msvcup_pkg_str).map_err(|e| {
-                anyhow::anyhow!(
-                    "{}:{}: invalid msvcup pkg '{}': {}",
-                    lock_file_path,
-                    lineno,
-                    msvcup_pkg_str,
-                    e
-                )
-            })?,
-        )
+        Some(MsvcupPackage::from_string(msvcup_pkg_str).map_err(|e| {
+            anyhow::anyhow!(
+                "{}:{}: invalid msvcup pkg '{}': {}",
+                lock_file_path,
+                lineno,
+                msvcup_pkg_str,
+                e
+            )
+        })?)
     };
 
     let url_start = msvcup_pkg_end + 1;
@@ -187,40 +183,32 @@ pub fn check_lock_file_pkgs(
             Ok(p) => p,
             Err(e) => return Some(format!("parse error: {}", e)),
         };
-        loop {
-            match &parsed.url_kind {
-                LockFilePayloadKind::TopLevel(payload_pkg) => {
-                    match MsvcupPackage::order(&msvcup_pkgs[msvcup_pkg_index], payload_pkg) {
-                        Ordering::Equal => {
-                            msvcup_pkg_match_count += 1;
-                            break;
-                        }
-                        Ordering::Less => {
-                            if msvcup_pkg_match_count == 0 {
-                                return Some(format!(
-                                    "lock file is missing package '{}'",
-                                    msvcup_pkgs[msvcup_pkg_index]
-                                ));
-                            }
-                            if msvcup_pkg_index + 1 == msvcup_pkgs.len() {
-                                return Some(format!(
-                                    "lock file has extra package '{}'",
-                                    payload_pkg
-                                ));
-                            }
-                            msvcup_pkg_index += 1;
-                            msvcup_pkg_match_count = 0;
-                            continue;
-                        }
-                        Ordering::Greater => {
-                            return Some(format!(
-                                "lock file has extra package '{}'",
-                                payload_pkg
-                            ));
-                        }
-                    }
+        while let LockFilePayloadKind::TopLevel(payload_pkg) = &parsed.url_kind {
+            match MsvcupPackage::order(&msvcup_pkgs[msvcup_pkg_index], payload_pkg) {
+                Ordering::Equal => {
+                    msvcup_pkg_match_count += 1;
+                    break;
                 }
-                LockFilePayloadKind::Cab(_) => break,
+                Ordering::Less => {
+                    if msvcup_pkg_match_count == 0 {
+                        return Some(format!(
+                            "lock file is missing package '{}'",
+                            msvcup_pkgs[msvcup_pkg_index]
+                        ));
+                    }
+                    if msvcup_pkg_index + 1 == msvcup_pkgs.len() {
+                        return Some(format!(
+                            "lock file has extra package '{}'",
+                            payload_pkg
+                        ));
+                    }
+                    msvcup_pkg_index += 1;
+                    msvcup_pkg_match_count = 0;
+                    continue;
+                }
+                Ordering::Greater => {
+                    return Some(format!("lock file has extra package '{}'", payload_pkg));
+                }
             }
         }
     }
