@@ -11,12 +11,9 @@ pub async fn fetch_command(
     url: &str,
     cache_dir: Option<&str>,
 ) -> Result<()> {
-    // Validate URL
-    let _uri = url::Url::parse(url).map_err(|e| anyhow::anyhow!("invalid URL '{}': {}", url, e))?;
-
     // Validate it's a known package URL
     match crate::extra::parse_url(url) {
-        crate::extra::ParseUrlResult::Ok(_) => {}
+        crate::extra::ParseUrlResult::Ok { .. } => {}
         crate::extra::ParseUrlResult::Unexpected { offset, what } => {
             bail!(
                 "invalid package url '{}' expected {} at offset {} but got '{}'",

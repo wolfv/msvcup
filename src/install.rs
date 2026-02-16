@@ -51,7 +51,7 @@ pub async fn install_command(
             if let Some(mismatch) = check_lock_file_pkgs(lock_file_path, &content, msvcup_pkgs) {
                 log::info!("{}", mismatch);
             } else {
-                match install_from_lock_file(
+                install_from_lock_file(
                     client,
                     msvcup_pkgs,
                     msvcup_dir,
@@ -59,11 +59,8 @@ pub async fn install_command(
                     lock_file_path,
                     &content,
                 )
-                .await?
-                {
-                    InstallResult::Success => return Ok(()),
-                    InstallResult::VersionMismatch => {}
-                }
+                .await?;
+                return Ok(());
             }
         } else {
             log::info!("lock file NOT found: '{}'", lock_file_path);
@@ -94,7 +91,7 @@ pub async fn install_command(
         );
     }
 
-    match install_from_lock_file(
+    install_from_lock_file(
         client,
         msvcup_pkgs,
         msvcup_dir,
@@ -102,16 +99,7 @@ pub async fn install_command(
         lock_file_path,
         &lock_file_content,
     )
-    .await?
-    {
-        InstallResult::Success => Ok(()),
-        InstallResult::VersionMismatch => bail!("lock file version mismatch even after update"),
-    }
-}
-
-enum InstallResult {
-    Success,
-    VersionMismatch,
+    .await
 }
 
 /// Information needed to fetch a single payload
@@ -128,7 +116,7 @@ async fn install_from_lock_file(
     cache_dir: &str,
     lock_file_path: &str,
     lock_file_content: &str,
-) -> Result<InstallResult> {
+) -> Result<()> {
     // --- Pass 1: Parse lock file and collect all fetch tasks ---
     let mut fetch_tasks: Vec<FetchTask> = Vec::new();
 
@@ -232,7 +220,7 @@ async fn install_from_lock_file(
         finish_package(msvcup_dir, msvcup_pkg)?;
     }
 
-    Ok(InstallResult::Success)
+    Ok(())
 }
 
 async fn fetch_payload_async(
@@ -516,6 +504,7 @@ fn install_msi(
     Ok(())
 }
 
+#[cfg(windows)]
 fn install_dir_recursive(
     source_dir: &Path,
     install_dir: &Path,
@@ -668,106 +657,26 @@ pub fn update_lock_file(
 
         // Check if this package should be installed
         if let Some(install_pkg) = get_install_pkg(&pkg.id) {
-            match install_pkg {
-                InstallPkgKind::Msvc(pkg_version) => {
-                    for msvcup_pkg in msvcup_pkgs {
-                        if msvcup_pkg.kind == MsvcupPackageKind::Msvc
-                            && msvcup_pkg.version == pkg_version
-                        {
-                            let range = pkgs.payload_range_from_pkg_index(pkg_index);
-                            for pi in range {
-                                insert_sorted(
-                                    &mut install_payloads,
-                                    (msvcup_pkg.clone(), pi),
-                                    |a, b| match MsvcupPackage::order(&a.0, &b.0) {
-                                        Ordering::Equal => a.1.cmp(&b.1),
-                                        other => other,
-                                    },
-                                );
-                            }
-                            break;
+            let (target_kind, target_version) = match &install_pkg {
+                InstallPkgKind::Msvc(v) => (MsvcupPackageKind::Msvc, v.as_str()),
+                InstallPkgKind::Msbuild(v) => (MsvcupPackageKind::Msbuild, v.as_str()),
+                InstallPkgKind::Diasdk => (MsvcupPackageKind::Diasdk, pkg.version.as_str()),
+                InstallPkgKind::Ninja(v) => (MsvcupPackageKind::Ninja, v.as_str()),
+                InstallPkgKind::Cmake(v) => (MsvcupPackageKind::Cmake, v.as_str()),
+            };
+
+            if let Some(msvcup_pkg) = msvcup_pkgs
+                .iter()
+                .find(|p| p.kind == target_kind && p.version == target_version)
+            {
+                let range = pkgs.payload_range_from_pkg_index(pkg_index);
+                for pi in range {
+                    insert_sorted(&mut install_payloads, (msvcup_pkg.clone(), pi), |a, b| {
+                        match MsvcupPackage::order(&a.0, &b.0) {
+                            Ordering::Equal => a.1.cmp(&b.1),
+                            other => other,
                         }
-                    }
-                }
-                InstallPkgKind::Msbuild(pkg_version) => {
-                    for msvcup_pkg in msvcup_pkgs {
-                        if msvcup_pkg.kind == MsvcupPackageKind::Msbuild
-                            && msvcup_pkg.version == pkg_version
-                        {
-                            let range = pkgs.payload_range_from_pkg_index(pkg_index);
-                            for pi in range {
-                                insert_sorted(
-                                    &mut install_payloads,
-                                    (msvcup_pkg.clone(), pi),
-                                    |a, b| match MsvcupPackage::order(&a.0, &b.0) {
-                                        Ordering::Equal => a.1.cmp(&b.1),
-                                        other => other,
-                                    },
-                                );
-                            }
-                            break;
-                        }
-                    }
-                }
-                InstallPkgKind::Diasdk => {
-                    for msvcup_pkg in msvcup_pkgs {
-                        if msvcup_pkg.kind == MsvcupPackageKind::Diasdk
-                            && msvcup_pkg.version == pkg.version
-                        {
-                            let range = pkgs.payload_range_from_pkg_index(pkg_index);
-                            for pi in range {
-                                insert_sorted(
-                                    &mut install_payloads,
-                                    (msvcup_pkg.clone(), pi),
-                                    |a, b| match MsvcupPackage::order(&a.0, &b.0) {
-                                        Ordering::Equal => a.1.cmp(&b.1),
-                                        other => other,
-                                    },
-                                );
-                            }
-                            break;
-                        }
-                    }
-                }
-                InstallPkgKind::Ninja(pkg_version) => {
-                    for msvcup_pkg in msvcup_pkgs {
-                        if msvcup_pkg.kind == MsvcupPackageKind::Ninja
-                            && msvcup_pkg.version == pkg_version
-                        {
-                            let range = pkgs.payload_range_from_pkg_index(pkg_index);
-                            for pi in range {
-                                insert_sorted(
-                                    &mut install_payloads,
-                                    (msvcup_pkg.clone(), pi),
-                                    |a, b| match MsvcupPackage::order(&a.0, &b.0) {
-                                        Ordering::Equal => a.1.cmp(&b.1),
-                                        other => other,
-                                    },
-                                );
-                            }
-                            break;
-                        }
-                    }
-                }
-                InstallPkgKind::Cmake(pkg_version) => {
-                    for msvcup_pkg in msvcup_pkgs {
-                        if msvcup_pkg.kind == MsvcupPackageKind::Cmake
-                            && msvcup_pkg.version == pkg_version
-                        {
-                            let range = pkgs.payload_range_from_pkg_index(pkg_index);
-                            for pi in range {
-                                insert_sorted(
-                                    &mut install_payloads,
-                                    (msvcup_pkg.clone(), pi),
-                                    |a, b| match MsvcupPackage::order(&a.0, &b.0) {
-                                        Ordering::Equal => a.1.cmp(&b.1),
-                                        other => other,
-                                    },
-                                );
-                            }
-                            break;
-                        }
-                    }
+                    });
                 }
             }
         }

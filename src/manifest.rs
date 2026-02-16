@@ -278,8 +278,6 @@ async fn resolve_ch_manifest_url(
 
 struct VsManifestPayload {
     url: String,
-    sha256: Sha256,
-    size: u64,
 }
 
 fn vs_manifest_payload_from_ch_manifest(
@@ -322,29 +320,9 @@ fn vs_manifest_payload_from_ch_manifest(
             let url = payload.get("url").and_then(|v| v.as_str()).ok_or_else(|| {
                 anyhow::anyhow!("{}: payload missing 'url'", chman_path.display())
             })?;
-            let sha256_str = payload
-                .get("sha256")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("{}: payload missing 'sha256'", chman_path.display())
-                })?;
-            let sha256_hex = sha256_str.to_ascii_lowercase();
-            let sha256 = Sha256::parse_hex(&sha256_hex).ok_or_else(|| {
-                anyhow::anyhow!("{}: invalid sha256 '{}'", chman_path.display(), sha256_str)
-            })?;
-            let size = payload
-                .get("size")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("{}: payload missing 'size'", chman_path.display())
-                })?;
 
             let decoded_url = crate::util::alloc_url_percent_decoded(url);
-            return Ok(VsManifestPayload {
-                url: decoded_url,
-                sha256,
-                size,
-            });
+            return Ok(VsManifestPayload { url: decoded_url });
         }
     }
 

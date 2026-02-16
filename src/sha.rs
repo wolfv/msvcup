@@ -7,16 +7,9 @@ pub struct Sha256 {
 }
 
 impl Sha256 {
-    pub fn parse_hex(hex: &str) -> Option<Sha256> {
-        if hex.len() != 64 {
-            return None;
-        }
-        let mut bytes = [0u8; 32];
-        for (i, byte) in bytes.iter_mut().enumerate() {
-            let high = nibble_from_hex(hex.as_bytes()[i * 2])?;
-            let low = nibble_from_hex(hex.as_bytes()[i * 2 + 1])?;
-            *byte = (high << 4) | low;
-        }
+    pub fn parse_hex(hex_str: &str) -> Option<Sha256> {
+        let decoded = hex::decode(hex_str).ok()?;
+        let bytes: [u8; 32] = decoded.try_into().ok()?;
         Some(Sha256 { bytes })
     }
 
@@ -27,10 +20,7 @@ impl Sha256 {
 
 impl fmt::Display for Sha256 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in &self.bytes {
-            write!(f, "{:02x}", byte)?;
-        }
-        Ok(())
+        f.write_str(&self.to_hex())
     }
 }
 
@@ -38,19 +28,6 @@ impl fmt::Debug for Sha256 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Sha256({})", self)
     }
-}
-
-fn nibble_from_hex(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
-    }
-}
-
-pub fn lower_sha_hex(hex: &str) -> String {
-    hex.to_ascii_lowercase()
 }
 
 pub struct Sha256Streaming {

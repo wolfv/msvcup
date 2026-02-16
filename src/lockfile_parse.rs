@@ -11,6 +11,7 @@ pub struct LockFilePayload {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum LockFilePayloadKind {
     TopLevel(MsvcupPackage),
     Cab(String),
@@ -33,7 +34,7 @@ impl LockFilePayload {
                 | MsvcupPackageKind::Diasdk => None,
                 MsvcupPackageKind::Ninja | MsvcupPackageKind::Cmake => {
                     match crate::extra::parse_url(&self.url_decoded) {
-                        crate::extra::ParseUrlResult::Ok(p) => Some(p.arch),
+                        crate::extra::ParseUrlResult::Ok { arch } => Some(arch),
                         crate::extra::ParseUrlResult::Unexpected { .. } => None,
                     }
                 }

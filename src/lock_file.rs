@@ -29,11 +29,6 @@ impl LockFile {
 
         Ok(LockFile { path, file })
     }
-
-    pub fn unlock(self) {
-        let _ = self.file.unlock();
-        let _ = fs::remove_file(&self.path);
-    }
 }
 
 impl Drop for LockFile {

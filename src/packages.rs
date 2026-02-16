@@ -121,6 +121,7 @@ impl fmt::Display for MsvcupPackageParseError {
 // --- Package identification (from VS manifest) ---
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum PackageId<'a> {
     Unknown,
     Unexpected {
@@ -354,13 +355,10 @@ impl Language {
     pub fn from_str(s: &str) -> Language {
         if s == "neutral" {
             Language::Neutral
-        } else if s == "en-US" {
+        } else if s.eq_ignore_ascii_case("en-US") {
             Language::EnUs
         } else if OTHER_LANGUAGES.contains(&s) {
             Language::Other
-        } else if s.eq_ignore_ascii_case("en-US") {
-            // Handle different casing
-            Language::EnUs
         } else {
             log::warn!("unknown language '{}'", s);
             Language::Other

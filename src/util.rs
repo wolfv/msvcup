@@ -16,22 +16,6 @@ pub fn order_dotted_numeric(lhs: &str, rhs: &str) -> Ordering {
     }
 }
 
-pub fn order_dotted_alphabetical(lhs: &str, rhs: &str) -> Ordering {
-    let mut lhs_it = lhs.split('.');
-    let mut rhs_it = rhs.split('.');
-    loop {
-        match (lhs_it.next(), rhs_it.next()) {
-            (None, None) => return Ordering::Equal,
-            (None, Some(_)) => return Ordering::Less,
-            (Some(_), None) => return Ordering::Greater,
-            (Some(l), Some(r)) => match l.cmp(r) {
-                Ordering::Equal => continue,
-                other => return other,
-            },
-        }
-    }
-}
-
 pub fn order_numeric(lhs: &str, rhs: &str) -> Ordering {
     match (lhs.parse::<u64>(), rhs.parse::<u64>()) {
         (Ok(l), Ok(r)) => l.cmp(&r),

@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 mod arch;
 mod autoenv_cmd;
 mod channel_kind;
@@ -151,49 +149,33 @@ async fn list_command(client: &reqwest::Client, msvcup_dir: &manifest::MsvcupDir
 
     let mut msvcup_pkgs: Vec<MsvcupPackage> = Vec::new();
     for (pkg_index, pkg) in pkgs.packages.iter().enumerate() {
-        match identify_package(&pkg.id) {
-            PackageId::Unknown => {}
-            PackageId::Unexpected { .. } => {}
-            PackageId::MsvcVersionSomething { .. } => {}
-            PackageId::MsvcVersionToolsSomething { .. } => {}
+        let maybe_pkg = match identify_package(&pkg.id) {
             PackageId::MsvcVersionHostTarget { build_version, .. } => {
-                let msvcup_pkg = MsvcupPackage::new(MsvcupPackageKind::Msvc, build_version);
-                util::insert_sorted(&mut msvcup_pkgs, msvcup_pkg, |a, b| {
-                    MsvcupPackage::order(a, b)
-                });
+                Some(MsvcupPackage::new(MsvcupPackageKind::Msvc, build_version))
             }
             PackageId::Msbuild(version) => {
-                let msvcup_pkg = MsvcupPackage::new(MsvcupPackageKind::Msbuild, version);
-                util::insert_sorted(&mut msvcup_pkgs, msvcup_pkg, |a, b| {
-                    MsvcupPackage::order(a, b)
-                });
+                Some(MsvcupPackage::new(MsvcupPackageKind::Msbuild, version))
             }
-            PackageId::Diasdk => {
-                let msvcup_pkg = MsvcupPackage::new(MsvcupPackageKind::Diasdk, pkg.version.clone());
-                util::insert_sorted(&mut msvcup_pkgs, msvcup_pkg, |a, b| {
-                    MsvcupPackage::order(a, b)
-                });
-            }
+            PackageId::Diasdk => Some(MsvcupPackage::new(
+                MsvcupPackageKind::Diasdk,
+                pkg.version.clone(),
+            )),
             PackageId::Ninja(version) => {
-                let msvcup_pkg = MsvcupPackage::new(MsvcupPackageKind::Ninja, version);
-                util::insert_sorted(&mut msvcup_pkgs, msvcup_pkg, |a, b| {
-                    MsvcupPackage::order(a, b)
-                });
+                Some(MsvcupPackage::new(MsvcupPackageKind::Ninja, version))
             }
             PackageId::Cmake(version) => {
-                let msvcup_pkg = MsvcupPackage::new(MsvcupPackageKind::Cmake, version);
-                util::insert_sorted(&mut msvcup_pkgs, msvcup_pkg, |a, b| {
-                    MsvcupPackage::order(a, b)
-                });
+                Some(MsvcupPackage::new(MsvcupPackageKind::Cmake, version))
             }
+            _ => None,
+        };
+        if let Some(msvcup_pkg) = maybe_pkg {
+            util::insert_sorted(&mut msvcup_pkgs, msvcup_pkg, MsvcupPackage::order);
         }
 
         for payload in pkgs.payloads_from_pkg_index(pkg_index) {
             if identify_payload(&payload.file_name) == PayloadId::Sdk {
                 let msvcup_pkg = MsvcupPackage::new(MsvcupPackageKind::Sdk, pkg.version.clone());
-                util::insert_sorted(&mut msvcup_pkgs, msvcup_pkg, |a, b| {
-                    MsvcupPackage::order(a, b)
-                });
+                util::insert_sorted(&mut msvcup_pkgs, msvcup_pkg, MsvcupPackage::order);
             }
         }
     }

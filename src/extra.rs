@@ -1,25 +1,7 @@
 use crate::arch::Arch;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PackageKind {
-    Ninja,
-    Cmake,
-}
-
-#[derive(Debug, Clone)]
-pub struct Package {
-    pub kind: PackageKind,
-    pub version: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct ExtraPayload {
-    pub package: Package,
-    pub arch: Arch,
-}
-
 pub enum ParseUrlResult {
-    Ok(ExtraPayload),
+    Ok { arch: Arch },
     Unexpected { offset: usize, what: String },
 }
 
@@ -33,7 +15,6 @@ pub fn parse_url(url: &str) -> ParseUrlResult {
                 what: "a version".to_string(),
             };
         }
-        let version = &rest[..version_end];
         let remaining = &rest[version_end..];
         let arch = if remaining == "/ninja-win.zip" {
             Arch::X64
@@ -45,13 +26,7 @@ pub fn parse_url(url: &str) -> ParseUrlResult {
                 what: "either '/ninja-win.zip' or '/ninja-winarm64.zip'".to_string(),
             };
         };
-        return ParseUrlResult::Ok(ExtraPayload {
-            package: Package {
-                kind: PackageKind::Ninja,
-                version: version.to_string(),
-            },
-            arch,
-        });
+        return ParseUrlResult::Ok { arch };
     }
 
     let cmake_prefix = "https://github.com/Kitware/CMake/releases/download/v";
@@ -80,13 +55,7 @@ pub fn parse_url(url: &str) -> ParseUrlResult {
                     what: "'x86_64.zip', 'i386.zip', or 'arm64.zip'".to_string(),
                 };
             };
-            return ParseUrlResult::Ok(ExtraPayload {
-                package: Package {
-                    kind: PackageKind::Cmake,
-                    version: version.to_string(),
-                },
-                arch,
-            });
+            return ParseUrlResult::Ok { arch };
         } else {
             return ParseUrlResult::Unexpected {
                 offset: cmake_prefix.len() + version_end,
