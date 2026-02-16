@@ -2,9 +2,10 @@ use crate::channel_kind::ChannelKind;
 use crate::lock_file::LockFile;
 use crate::packages::ManifestUpdate;
 use crate::sha::{Sha256, Sha256Streaming};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
+use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 /// The msvcup data directory
@@ -43,25 +44,39 @@ fn read_file_opt(path: &Path) -> Result<Option<String>> {
 }
 
 /// Fetch a URL to a file, returning the SHA256 hash
-pub fn fetch(
-    client: &reqwest::blocking::Client,
-    url: &str,
-    out_path: &Path,
-) -> Result<Sha256> {
-    log::info!("fetch: {}", url);
-
+pub fn fetch(client: &reqwest::blocking::Client, url: &str, out_path: &Path) -> Result<Sha256> {
     let response = client
         .get(url)
         .send()
         .with_context(|| format!("fetching '{}'", url))?;
 
     if !response.status().is_success() {
-        bail!(
-            "fetch '{}': HTTP status {}",
-            url,
-            response.status()
-        );
+        bail!("fetch '{}': HTTP status {}", url, response.status());
     }
+
+    let total_size = response.content_length();
+    let file_name = crate::util::basename_from_url(url);
+
+    let pb = if let Some(size) = total_size {
+        let pb = ProgressBar::new(size);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{msg}\n  [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec})")
+                .expect("valid template")
+                .progress_chars("=> "),
+        );
+        pb.set_message(file_name.to_string());
+        pb
+    } else {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .template("{msg} {bytes} ({bytes_per_sec})")
+                .expect("valid template"),
+        );
+        pb.set_message(file_name.to_string());
+        pb
+    };
 
     if let Some(dir) = out_path.parent() {
         fs::create_dir_all(dir)
@@ -71,11 +86,23 @@ pub fn fetch(
     let mut file =
         fs::File::create(out_path).with_context(|| format!("creating '{}'", out_path.display()))?;
     let mut hasher = Sha256Streaming::new();
+    let mut reader = response;
+    let mut buf = [0u8; 8192];
 
-    let bytes = response.bytes().with_context(|| format!("reading response from '{}'", url))?;
-    hasher.update(&bytes);
-    file.write_all(&bytes)
-        .with_context(|| format!("writing to '{}'", out_path.display()))?;
+    loop {
+        let n = reader
+            .read(&mut buf)
+            .with_context(|| format!("reading response from '{}'", url))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        file.write_all(&buf[..n])
+            .with_context(|| format!("writing to '{}'", out_path.display()))?;
+        pb.inc(n as u64);
+    }
+
+    pb.finish_and_clear();
 
     Ok(hasher.finalize())
 }
@@ -144,8 +171,7 @@ pub fn read_vs_manifest(
     }
 
     // Read channel manifest (releases lock to avoid deadlock)
-    let (chman_path, chman_content) =
-        read_ch_manifest(client, msvcup_dir, channel_kind, update)?;
+    let (chman_path, chman_content) = read_ch_manifest(client, msvcup_dir, channel_kind, update)?;
 
     // Re-acquire lock and check again
     {
@@ -163,10 +189,12 @@ pub fn read_vs_manifest(
         }
 
         // Parse channel manifest to find VS manifest URL
-        let payload = vs_manifest_payload_from_ch_manifest(channel_kind, &chman_path, &chman_content)?;
+        let payload =
+            vs_manifest_payload_from_ch_manifest(channel_kind, &chman_path, &chman_content)?;
         let _sha256 = fetch(client, &payload.url, &vsman_latest_path)?;
-        let content = read_file_opt(&vsman_latest_path)?
-            .ok_or_else(|| anyhow::anyhow!("{} still doesn't exist", vsman_latest_path.display()))?;
+        let content = read_file_opt(&vsman_latest_path)?.ok_or_else(|| {
+            anyhow::anyhow!("{} still doesn't exist", vsman_latest_path.display())
+        })?;
         Ok((vsman_latest_path, content))
     }
 }
@@ -212,8 +240,9 @@ fn read_ch_manifest(
         }
 
         let _sha256 = fetch(client, &url_content, &chman_latest_path)?;
-        let content = read_file_opt(&chman_latest_path)?
-            .ok_or_else(|| anyhow::anyhow!("{} still doesn't exist", chman_latest_path.display()))?;
+        let content = read_file_opt(&chman_latest_path)?.ok_or_else(|| {
+            anyhow::anyhow!("{} still doesn't exist", chman_latest_path.display())
+        })?;
         Ok((chman_latest_path, content))
     }
 }
@@ -263,20 +292,12 @@ fn vs_manifest_payload_from_ch_manifest(
     let channel_items = parsed
         .get("channelItems")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "{}: missing 'channelItems' array",
-                chman_path.display()
-            )
-        })?;
+        .ok_or_else(|| anyhow::anyhow!("{}: missing 'channelItems' array", chman_path.display()))?;
 
     let vs_manifest_id = channel_kind.vs_manifest_channel_id();
 
     for item in channel_items {
-        let id = item
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
+        let id = item.get("id").and_then(|v| v.as_str()).unwrap_or_default();
         if id == vs_manifest_id {
             let payloads = item
                 .get("payloads")
@@ -297,12 +318,9 @@ fn vs_manifest_payload_from_ch_manifest(
                 );
             }
             let payload = &payloads[0];
-            let url = payload
-                .get("url")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("{}: payload missing 'url'", chman_path.display())
-                })?;
+            let url = payload.get("url").and_then(|v| v.as_str()).ok_or_else(|| {
+                anyhow::anyhow!("{}: payload missing 'url'", chman_path.display())
+            })?;
             let sha256_str = payload
                 .get("sha256")
                 .and_then(|v| v.as_str())

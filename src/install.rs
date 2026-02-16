@@ -175,9 +175,9 @@ fn fetch_payload(
     let _cache_lock = LockFile::lock(&cache_lock_path)?;
 
     if cache_path.exists() {
-        log::info!("ALREADY FETCHED  | {} {}", url_decoded, sha256);
+        log::debug!("ALREADY FETCHED  | {} {}", url_decoded, sha256);
     } else {
-        log::info!("FETCHING         | {} {}", url_decoded, sha256);
+        log::debug!("FETCHING         | {} {}", url_decoded, sha256);
         let fetch_path = PathBuf::from(format!("{}.fetching", cache_path.display()));
         let actual_sha256 = fetch(client, url_decoded, &fetch_path)?;
         if actual_sha256 != *sha256 {
