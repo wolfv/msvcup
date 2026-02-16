@@ -41,9 +41,3 @@ zip = "2"
 default = ["rustls"]
 rustls = ["reqwest/rustls"]
 native-tls = ["reqwest/native-tls"]
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = [
-    "Win32_System_JobObjects",
-    "Win32_System_Threading",
-] }

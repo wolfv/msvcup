@@ -85,108 +85,18 @@ fn windows_main() -> i32 {
         }
     };
 
-    // 5. Spawn the real tool
+    // 5. Spawn the real tool, forwarding all arguments
     let args: Vec<String> = env::args().skip(1).collect();
-
-    // For cl.exe, skip job object (causes PDB errors in Zig version too)
-    let use_job = !self_basename.eq_ignore_ascii_case("cl.exe");
-
-    if use_job {
-        run_with_job(&real_exe, &args)
-    } else {
-        run_direct(&real_exe, &args)
-    }
-}
-
-#[cfg(windows)]
-fn run_direct(exe: &std::path::Path, args: &[String]) -> i32 {
-    use std::process::Command;
-    match Command::new(exe).args(args).status() {
+    match Command::new(&real_exe).args(&args).status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
             eprintln!(
                 "msvcup-autoenv: failed to execute '{}': {e}",
-                exe.display()
+                real_exe.display()
             );
             1
         }
     }
-}
-
-#[cfg(windows)]
-fn run_with_job(exe: &std::path::Path, args: &[String]) -> i32 {
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
-    use windows_sys::Win32::System::JobObjects::*;
-    use windows_sys::Win32::System::Threading::*;
-
-    // Create a job object with KILL_ON_JOB_CLOSE
-    let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-    if job.is_null() {
-        // Fall back to direct execution
-        return run_direct(exe, args);
-    }
-
-    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    let set_ok = unsafe {
-        SetInformationJobObject(
-            job,
-            JobObjectExtendedLimitInformation,
-            &info as *const _ as *const _,
-            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-        )
-    };
-    if set_ok == 0 {
-        return run_direct(exe, args);
-    }
-
-    // Spawn suspended so we can assign to job before it runs
-    const CREATE_SUSPENDED: u32 = 0x00000004;
-    let mut child = match Command::new(exe)
-        .args(args)
-        .creation_flags(CREATE_SUSPENDED)
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!(
-                "msvcup-autoenv: failed to execute '{}': {e}",
-                exe.display()
-            );
-            return 1;
-        }
-    };
-
-    // Assign to job and resume
-    use std::os::windows::io::AsRawHandle;
-    let process_handle = child.as_raw_handle();
-    unsafe {
-        AssignProcessToJobObject(job, process_handle);
-        // Resume the main thread - we need to use the undocumented NtResumeProcess
-        // or we can use ResumeThread on the thread handle.
-        // Since std::process::Child doesn't expose the thread handle,
-        // we use NtResumeProcess via ntdll.
-        ntdll_resume_process(process_handle);
-    }
-
-    match child.wait() {
-        Ok(status) => status.code().unwrap_or(1),
-        Err(e) => {
-            eprintln!("msvcup-autoenv: failed to wait for process: {e}");
-            1
-        }
-    }
-}
-
-#[cfg(windows)]
-unsafe fn ntdll_resume_process(process_handle: std::os::windows::io::RawHandle) {
-    // Link to NtResumeProcess from ntdll
-    #[link(name = "ntdll")]
-    extern "system" {
-        fn NtResumeProcess(process_handle: isize) -> i32;
-    }
-    NtResumeProcess(process_handle as isize);
 }
 
 /// Parse a vcvars .bat file and update environment variables.
@@ -202,8 +112,8 @@ fn load_vcvars(vcvars_path: &str) -> Result<(), String> {
     use std::fs;
     use std::path::Path;
 
-    let content = fs::read_to_string(vcvars_path)
-        .map_err(|e| format!("cannot read '{vcvars_path}': {e}"))?;
+    let content =
+        fs::read_to_string(vcvars_path).map_err(|e| format!("cannot read '{vcvars_path}': {e}"))?;
 
     let root_dir = Path::new(vcvars_path)
         .parent()
@@ -217,7 +127,9 @@ fn load_vcvars(vcvars_path: &str) -> Result<(), String> {
         // Expected format: set "NAME=<paths>;%NAME%"
         let prefix = "set \"";
         if !line.starts_with(prefix) {
-            return Err(format!("{vcvars_path}:{lineno}: line did not start with '{prefix}'"));
+            return Err(format!(
+                "{vcvars_path}:{lineno}: line did not start with '{prefix}'"
+            ));
         }
         let after_prefix = &line[prefix.len()..];
 

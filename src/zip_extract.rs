@@ -13,8 +13,8 @@ pub fn extract_zip_to_dir(
 ) -> Result<()> {
     let file = fs::File::open(cache_path)
         .with_context(|| format!("opening '{}'", cache_path.display()))?;
-    let mut archive =
-        zip::ZipArchive::new(file).with_context(|| format!("reading ZIP '{}'", cache_path.display()))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .with_context(|| format!("reading ZIP '{}'", cache_path.display()))?;
 
     let prefix = match kind {
         ZipKind::Vsix => "Contents/",
@@ -37,7 +37,10 @@ pub fn extract_zip_to_dir(
         // Check for . and .. components
         for part in filename.split('/') {
             if part == "." || part == ".." {
-                anyhow::bail!("ZIP filename contains '.' or '..' component: '{}'", filename);
+                anyhow::bail!(
+                    "ZIP filename contains '.' or '..' component: '{}'",
+                    filename
+                );
             }
         }
 
@@ -63,14 +66,14 @@ pub fn extract_zip_to_dir(
                 anyhow::anyhow!("no root dir to strip from '{}'", sub_path_decoded)
             })?;
             let root_dir = &sub_path_decoded[..sep_pos];
-            if let Some(ref last) = last_root_dir {
-                if last != root_dir {
-                    anyhow::bail!(
-                        "root dir changed from '{}' to '{}', cannot strip",
-                        last,
-                        root_dir
-                    );
-                }
+            if let Some(ref last) = last_root_dir
+                && last != root_dir
+            {
+                anyhow::bail!(
+                    "root dir changed from '{}' to '{}', cannot strip",
+                    last,
+                    root_dir
+                );
             }
             last_root_dir = Some(root_dir.to_string());
             &sub_path_decoded[sep_pos..]

@@ -211,7 +211,7 @@ pub fn identify_package(id: &str) -> PackageId<'_> {
                 return PackageId::Unexpected {
                     offset: msvc_prefix.len() + version_end + 1 + tools_end + 4,
                     expected: "arch",
-                }
+                };
             }
         };
         let rest4 = &rest3[host_end..];
@@ -229,7 +229,7 @@ pub fn identify_package(id: &str) -> PackageId<'_> {
                 return PackageId::Unexpected {
                     offset: msvc_prefix.len() + version_end + 1 + tools_end + host_end + 6,
                     expected: "arch",
-                }
+                };
             }
         };
         return PackageId::MsvcVersionHostTarget {
@@ -427,9 +427,9 @@ impl Packages {
             let max_range = self.payload_range_from_pkg_index(max);
             let remaining_payload_count = max_range.end - min_range.start;
             assert!(remaining_payload_count >= 1);
-            let ratio =
-                (payload_index - min_range.start) as f32 / remaining_payload_count as f32;
-            let guess = ((ratio * remaining_pkg_count as f32) as usize).min(remaining_pkg_count - 1);
+            let ratio = (payload_index - min_range.start) as f32 / remaining_payload_count as f32;
+            let guess =
+                ((ratio * remaining_pkg_count as f32) as usize).min(remaining_pkg_count - 1);
             let pkg_index = min + guess;
             let range = self.payload_range_from_pkg_index(pkg_index);
             if payload_index < range.start {
@@ -477,42 +477,36 @@ pub fn get_packages(vsman_path: &str, vsman_content: &str) -> Result<Packages> {
 
         let payloads_offset = out_payloads.len();
 
-        if let Some(payloads_val) = pkg_obj.get("payloads") {
-            if let Some(payloads_arr) = payloads_val.as_array() {
-                for payload_val in payloads_arr {
-                    let payload_obj = payload_val.as_object().ok_or_else(|| {
-                        anyhow::anyhow!("{}: payload is not an object", vsman_path)
-                    })?;
+        if let Some(payloads_val) = pkg_obj.get("payloads")
+            && let Some(payloads_arr) = payloads_val.as_array()
+        {
+            for payload_val in payloads_arr {
+                let payload_obj = payload_val
+                    .as_object()
+                    .ok_or_else(|| anyhow::anyhow!("{}: payload is not an object", vsman_path))?;
 
-                    let file_name = payload_obj
-                        .get("fileName")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("{}: payload missing 'fileName'", vsman_path)
-                        })?;
-                    let sha256_str = payload_obj
-                        .get("sha256")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("{}: payload missing 'sha256'", vsman_path)
-                        })?;
-                    let sha256_hex = sha256_str.to_ascii_lowercase();
-                    let sha256 = Sha256::parse_hex(&sha256_hex).ok_or_else(|| {
-                        anyhow::anyhow!("{}: invalid sha256 '{}'", vsman_path, sha256_str)
-                    })?;
-                    let url = payload_obj
-                        .get("url")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("{}: payload missing 'url'", vsman_path)
-                        })?;
+                let file_name = payload_obj
+                    .get("fileName")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("{}: payload missing 'fileName'", vsman_path))?;
+                let sha256_str = payload_obj
+                    .get("sha256")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("{}: payload missing 'sha256'", vsman_path))?;
+                let sha256_hex = sha256_str.to_ascii_lowercase();
+                let sha256 = Sha256::parse_hex(&sha256_hex).ok_or_else(|| {
+                    anyhow::anyhow!("{}: invalid sha256 '{}'", vsman_path, sha256_str)
+                })?;
+                let url = payload_obj
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("{}: payload missing 'url'", vsman_path))?;
 
-                    out_payloads.push(Payload {
-                        url_decoded: alloc_url_percent_decoded(url),
-                        sha256,
-                        file_name: file_name.to_string(),
-                    });
-                }
+                out_payloads.push(Payload {
+                    url_decoded: alloc_url_percent_decoded(url),
+                    sha256,
+                    file_name: file_name.to_string(),
+                });
             }
         }
 
@@ -551,8 +545,7 @@ pub fn get_install_pkg(id: &str) -> Option<InstallPkgKind> {
             }
             // Simplified: parse more carefully
             let after_crt = &something[1 + crt.len()..]; // skip ".CRT"
-            if after_crt.starts_with(".") {
-                let after_dot = &after_crt[1..];
+            if let Some(after_dot) = after_crt.strip_prefix(".") {
                 if after_dot == "Headers.base" {
                     return Some(InstallPkgKind::Msvc(build_version.to_string()));
                 }

@@ -90,17 +90,14 @@ pub fn parse_url(url: &str) -> ParseUrlResult {
         } else {
             return ParseUrlResult::Unexpected {
                 offset: cmake_prefix.len() + version_end,
-                what: format!("'/cmake-<version>-windows-<arch>.zip'"),
+                what: "'/cmake-<version>-windows-<arch>.zip'".to_string(),
             };
         }
     }
 
     ParseUrlResult::Unexpected {
         offset: 0,
-        what: format!(
-            "either '{}' or '{}'",
-            ninja_prefix, cmake_prefix
-        ),
+        what: format!("either '{}' or '{}'", ninja_prefix, cmake_prefix),
     }
 }
 

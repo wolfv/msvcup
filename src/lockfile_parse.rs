@@ -197,10 +197,7 @@ pub fn check_lock_file_pkgs(
                         ));
                     }
                     if msvcup_pkg_index + 1 == msvcup_pkgs.len() {
-                        return Some(format!(
-                            "lock file has extra package '{}'",
-                            payload_pkg
-                        ));
+                        return Some(format!("lock file has extra package '{}'", payload_pkg));
                     }
                     msvcup_pkg_index += 1;
                     msvcup_pkg_match_count = 0;

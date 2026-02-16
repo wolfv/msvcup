@@ -1,6 +1,6 @@
 use crate::arch::Arch;
 use crate::packages::{MsvcupPackage, MsvcupPackageKind};
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -79,11 +79,7 @@ pub fn autoenv_command(
             );
             // Check file exists
             if !Path::new(&vcvars_path).exists() {
-                bail!(
-                    "package '{}' has no vcvars file '{}'",
-                    pkg,
-                    vcvars_path
-                );
+                bail!("package '{}' has no vcvars file '{}'", pkg, vcvars_path);
             }
             writeln!(env_file, "{}", vcvars_path)?;
         }
@@ -117,8 +113,7 @@ pub fn autoenv_command(
 
     // Generate libc.txt
     {
-        let libc_txt =
-            generate_libc_txt(maybe_msvc_version, maybe_sdk_version, target_cpu)?;
+        let libc_txt = generate_libc_txt(maybe_msvc_version, maybe_sdk_version, target_cpu)?;
         let libc_path = Path::new(out_dir).join("libc.txt");
         update_file(&libc_path, libc_txt.as_bytes())?;
     }
