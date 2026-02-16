@@ -14,11 +14,11 @@ mod sha;
 mod util;
 mod zip_extract;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use packages::{
-    get_packages, identify_package, identify_payload, ManifestUpdate, MsvcupPackage,
-    MsvcupPackageKind, PackageId, PayloadId,
+    ManifestUpdate, MsvcupPackage, MsvcupPackageKind, PackageId, PayloadId, get_packages,
+    identify_package, identify_payload,
 };
 
 #[derive(Parser)]
@@ -86,7 +86,7 @@ fn parse_msvcup_packages(pkg_strings: &[String]) -> Result<Vec<MsvcupPackage>> {
     for s in pkg_strings {
         match MsvcupPackage::from_string(s) {
             Ok(pkg) => {
-                util::insert_sorted(&mut pkgs, pkg, |a, b| MsvcupPackage::order(a, b));
+                util::insert_sorted(&mut pkgs, pkg, MsvcupPackage::order);
             }
             Err(e) => bail!("invalid package '{}': {}", s, e),
         }
@@ -94,16 +94,17 @@ fn parse_msvcup_packages(pkg_strings: &[String]) -> Result<Vec<MsvcupPackage>> {
     Ok(pkgs)
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let cli = Cli::parse();
-    let client = reqwest::blocking::Client::builder().build()?;
+    let client = reqwest::Client::builder().build()?;
     let msvcup_dir = manifest::MsvcupDir::new()?;
 
     match cli.command {
-        Commands::List => list_command(&client, &msvcup_dir),
-        Commands::ListPayloads => list_payloads_command(&client, &msvcup_dir),
+        Commands::List => list_command(&client, &msvcup_dir).await,
+        Commands::ListPayloads => list_payloads_command(&client, &msvcup_dir).await,
         Commands::Install {
             packages: pkg_strings,
             lock_file,
@@ -119,6 +120,7 @@ fn main() -> Result<()> {
                 manifest_update,
                 cache_dir.as_deref(),
             )
+            .await
         }
         Commands::Autoenv {
             target_cpu,
@@ -131,21 +133,19 @@ fn main() -> Result<()> {
             autoenv_cmd::autoenv_command(&pkgs, target_cpu, &out_dir)
         }
         Commands::Fetch { url, cache_dir } => {
-            fetch_cmd::fetch_command(&client, &url, cache_dir.as_deref())
+            fetch_cmd::fetch_command(&client, &url, cache_dir.as_deref()).await
         }
     }
 }
 
-fn list_command(
-    client: &reqwest::blocking::Client,
-    msvcup_dir: &manifest::MsvcupDir,
-) -> Result<()> {
+async fn list_command(client: &reqwest::Client, msvcup_dir: &manifest::MsvcupDir) -> Result<()> {
     let (vsman_path, vsman_content) = manifest::read_vs_manifest(
         client,
         msvcup_dir,
         channel_kind::ChannelKind::Release,
         ManifestUpdate::Off,
-    )?;
+    )
+    .await?;
 
     let pkgs = get_packages(vsman_path.to_str().unwrap(), &vsman_content)?;
 
@@ -169,8 +169,7 @@ fn list_command(
                 });
             }
             PackageId::Diasdk => {
-                let msvcup_pkg =
-                    MsvcupPackage::new(MsvcupPackageKind::Diasdk, pkg.version.clone());
+                let msvcup_pkg = MsvcupPackage::new(MsvcupPackageKind::Diasdk, pkg.version.clone());
                 util::insert_sorted(&mut msvcup_pkgs, msvcup_pkg, |a, b| {
                     MsvcupPackage::order(a, b)
                 });
@@ -191,8 +190,7 @@ fn list_command(
 
         for payload in pkgs.payloads_from_pkg_index(pkg_index) {
             if identify_payload(&payload.file_name) == PayloadId::Sdk {
-                let msvcup_pkg =
-                    MsvcupPackage::new(MsvcupPackageKind::Sdk, pkg.version.clone());
+                let msvcup_pkg = MsvcupPackage::new(MsvcupPackageKind::Sdk, pkg.version.clone());
                 util::insert_sorted(&mut msvcup_pkgs, msvcup_pkg, |a, b| {
                     MsvcupPackage::order(a, b)
                 });
@@ -206,8 +204,8 @@ fn list_command(
     Ok(())
 }
 
-fn list_payloads_command(
-    client: &reqwest::blocking::Client,
+async fn list_payloads_command(
+    client: &reqwest::Client,
     msvcup_dir: &manifest::MsvcupDir,
 ) -> Result<()> {
     let (vsman_path, vsman_content) = manifest::read_vs_manifest(
@@ -215,7 +213,8 @@ fn list_payloads_command(
         msvcup_dir,
         channel_kind::ChannelKind::Release,
         ManifestUpdate::Off,
-    )?;
+    )
+    .await?;
 
     let pkgs = get_packages(vsman_path.to_str().unwrap(), &vsman_content)?;
 

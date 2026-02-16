@@ -3,9 +3,10 @@ use crate::lock_file::LockFile;
 use crate::packages::ManifestUpdate;
 use crate::sha::{Sha256, Sha256Streaming};
 use anyhow::{Context, Result, bail};
-use indicatif::{ProgressBar, ProgressStyle};
+use futures::StreamExt;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// The msvcup data directory
@@ -44,10 +45,16 @@ fn read_file_opt(path: &Path) -> Result<Option<String>> {
 }
 
 /// Fetch a URL to a file, returning the SHA256 hash
-pub fn fetch(client: &reqwest::blocking::Client, url: &str, out_path: &Path) -> Result<Sha256> {
+pub async fn fetch(
+    client: &reqwest::Client,
+    url: &str,
+    out_path: &Path,
+    mp: Option<&MultiProgress>,
+) -> Result<Sha256> {
     let response = client
         .get(url)
         .send()
+        .await
         .with_context(|| format!("fetching '{}'", url))?;
 
     if !response.status().is_success() {
@@ -78,6 +85,8 @@ pub fn fetch(client: &reqwest::blocking::Client, url: &str, out_path: &Path) -> 
         pb
     };
 
+    let pb = if let Some(mp) = mp { mp.add(pb) } else { pb };
+
     if let Some(dir) = out_path.parent() {
         fs::create_dir_all(dir)
             .with_context(|| format!("creating directory '{}'", dir.display()))?;
@@ -86,20 +95,14 @@ pub fn fetch(client: &reqwest::blocking::Client, url: &str, out_path: &Path) -> 
     let mut file =
         fs::File::create(out_path).with_context(|| format!("creating '{}'", out_path.display()))?;
     let mut hasher = Sha256Streaming::new();
-    let mut reader = response;
-    let mut buf = [0u8; 8192];
+    let mut stream = response.bytes_stream();
 
-    loop {
-        let n = reader
-            .read(&mut buf)
-            .with_context(|| format!("reading response from '{}'", url))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-        file.write_all(&buf[..n])
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("reading response from '{}'", url))?;
+        hasher.update(&chunk);
+        file.write_all(&chunk)
             .with_context(|| format!("writing to '{}'", out_path.display()))?;
-        pb.inc(n as u64);
+        pb.inc(chunk.len() as u64);
     }
 
     pb.finish_and_clear();
@@ -108,21 +111,18 @@ pub fn fetch(client: &reqwest::blocking::Client, url: &str, out_path: &Path) -> 
 }
 
 /// Fetch a URL, following redirects only to capture the redirect URL
-pub fn resolve_redirect(
-    _client: &reqwest::blocking::Client,
-    url: &str,
-    out_path: &Path,
-) -> Result<()> {
+pub async fn resolve_redirect(_client: &reqwest::Client, url: &str, out_path: &Path) -> Result<()> {
     log::info!("resolving URL '{}'...", url);
 
     // Use a client that doesn't follow redirects
-    let no_redirect_client = reqwest::blocking::Client::builder()
+    let no_redirect_client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
 
     let response = no_redirect_client
         .get(url)
         .send()
+        .await
         .with_context(|| format!("resolving '{}'", url))?;
 
     if response.status().is_redirection() {
@@ -146,8 +146,8 @@ pub fn resolve_redirect(
 }
 
 /// Read the VS manifest, fetching if necessary
-pub fn read_vs_manifest(
-    client: &reqwest::blocking::Client,
+pub async fn read_vs_manifest(
+    client: &reqwest::Client,
     msvcup_dir: &MsvcupDir,
     channel_kind: ChannelKind,
     update: ManifestUpdate,
@@ -171,7 +171,8 @@ pub fn read_vs_manifest(
     }
 
     // Read channel manifest (releases lock to avoid deadlock)
-    let (chman_path, chman_content) = read_ch_manifest(client, msvcup_dir, channel_kind, update)?;
+    let (chman_path, chman_content) =
+        read_ch_manifest(client, msvcup_dir, channel_kind, update).await?;
 
     // Re-acquire lock and check again
     {
@@ -191,7 +192,7 @@ pub fn read_vs_manifest(
         // Parse channel manifest to find VS manifest URL
         let payload =
             vs_manifest_payload_from_ch_manifest(channel_kind, &chman_path, &chman_content)?;
-        let _sha256 = fetch(client, &payload.url, &vsman_latest_path)?;
+        let _sha256 = fetch(client, &payload.url, &vsman_latest_path, None).await?;
         let content = read_file_opt(&vsman_latest_path)?.ok_or_else(|| {
             anyhow::anyhow!("{} still doesn't exist", vsman_latest_path.display())
         })?;
@@ -200,8 +201,8 @@ pub fn read_vs_manifest(
 }
 
 /// Read the channel manifest
-fn read_ch_manifest(
-    client: &reqwest::blocking::Client,
+async fn read_ch_manifest(
+    client: &reqwest::Client,
     msvcup_dir: &MsvcupDir,
     channel_kind: ChannelKind,
     update: ManifestUpdate,
@@ -225,7 +226,7 @@ fn read_ch_manifest(
 
     // Resolve the channel manifest URL
     let (_url_path, url_content) =
-        resolve_ch_manifest_url(client, msvcup_dir, channel_kind, update)?;
+        resolve_ch_manifest_url(client, msvcup_dir, channel_kind, update).await?;
 
     {
         let _lock = LockFile::lock(chman_lock_path.to_str().unwrap())?;
@@ -239,7 +240,7 @@ fn read_ch_manifest(
             ManifestUpdate::Always => {}
         }
 
-        let _sha256 = fetch(client, &url_content, &chman_latest_path)?;
+        let _sha256 = fetch(client, &url_content, &chman_latest_path, None).await?;
         let content = read_file_opt(&chman_latest_path)?.ok_or_else(|| {
             anyhow::anyhow!("{} still doesn't exist", chman_latest_path.display())
         })?;
@@ -248,8 +249,8 @@ fn read_ch_manifest(
 }
 
 /// Resolve the channel manifest URL (follows redirect from aka.ms)
-fn resolve_ch_manifest_url(
-    client: &reqwest::blocking::Client,
+async fn resolve_ch_manifest_url(
+    client: &reqwest::Client,
     msvcup_dir: &MsvcupDir,
     channel_kind: ChannelKind,
     update: ManifestUpdate,
@@ -269,7 +270,7 @@ fn resolve_ch_manifest_url(
         ManifestUpdate::Always => {}
     }
 
-    resolve_redirect(client, channel_kind.https_url(), &url_path)?;
+    resolve_redirect(client, channel_kind.https_url(), &url_path).await?;
     let content = read_file_opt(&url_path)?
         .ok_or_else(|| anyhow::anyhow!("{} still doesn't exist", url_path.display()))?;
     Ok((url_path, content))

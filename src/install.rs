@@ -12,13 +12,18 @@ use crate::sha::Sha256;
 use crate::util::{basename_from_url, insert_sorted};
 use crate::zip_extract::{self, ZipKind};
 use anyhow::{Context, Result, bail};
+use indicatif::MultiProgress;
 use std::cmp::Ordering;
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use tokio::sync::Semaphore;
 
-pub fn install_command(
-    client: &reqwest::blocking::Client,
+/// Max concurrent downloads
+const MAX_CONCURRENT_DOWNLOADS: usize = 8;
+
+pub async fn install_command(
+    client: &reqwest::Client,
     msvcup_dir: &MsvcupDir,
     msvcup_pkgs: &[MsvcupPackage],
     lock_file_path: &str,
@@ -53,7 +58,9 @@ pub fn install_command(
                     cache_dir_str,
                     lock_file_path,
                     &content,
-                )? {
+                )
+                .await?
+                {
                     InstallResult::Success => return Ok(()),
                     InstallResult::VersionMismatch => {}
                 }
@@ -69,11 +76,12 @@ pub fn install_command(
         msvcup_dir,
         crate::channel_kind::ChannelKind::Release,
         ManifestUpdate::Off,
-    )?;
+    )
+    .await?;
 
     let pkgs = get_packages(vsman_path.to_str().unwrap(), &vsman_content)?;
 
-    update_lock_file(client, msvcup_pkgs, lock_file_path, &pkgs, cache_dir_str)?;
+    update_lock_file(msvcup_pkgs, lock_file_path, &pkgs, cache_dir_str)?;
 
     let lock_file_content = fs::read_to_string(lock_file_path)
         .with_context(|| format!("reading lock file '{}' after update", lock_file_path))?;
@@ -93,7 +101,9 @@ pub fn install_command(
         cache_dir_str,
         lock_file_path,
         &lock_file_content,
-    )? {
+    )
+    .await?
+    {
         InstallResult::Success => Ok(()),
         InstallResult::VersionMismatch => bail!("lock file version mismatch even after update"),
     }
@@ -104,14 +114,75 @@ enum InstallResult {
     VersionMismatch,
 }
 
-fn install_from_lock_file(
-    client: &reqwest::blocking::Client,
+/// Information needed to fetch a single payload
+struct FetchTask {
+    url_decoded: String,
+    sha256: Sha256,
+    cache_path: PathBuf,
+}
+
+async fn install_from_lock_file(
+    client: &reqwest::Client,
     msvcup_pkgs: &[MsvcupPackage],
     msvcup_dir: &MsvcupDir,
     cache_dir: &str,
     lock_file_path: &str,
     lock_file_content: &str,
 ) -> Result<InstallResult> {
+    // --- Pass 1: Parse lock file and collect all fetch tasks ---
+    let mut fetch_tasks: Vec<FetchTask> = Vec::new();
+
+    for line in lock_file_content.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let parsed = parse_lock_file_payload(lock_file_path, 0, line)?;
+
+        // Skip payloads for non-native architectures
+        if let Some(host_arch_limit) = parsed.host_arch_limit()
+            && Arch::native() != Some(host_arch_limit)
+        {
+            continue;
+        }
+
+        let name = basename_from_url(&parsed.url_decoded);
+        let cache_path = cache_entry_path(cache_dir, &parsed.sha256, name);
+
+        fetch_tasks.push(FetchTask {
+            url_decoded: parsed.url_decoded,
+            sha256: parsed.sha256,
+            cache_path,
+        });
+    }
+
+    // --- Pass 2: Parallel fetch all payloads ---
+    let mp = MultiProgress::new();
+    let semaphore = std::sync::Arc::new(Semaphore::new(MAX_CONCURRENT_DOWNLOADS));
+
+    let mut handles = Vec::new();
+    for task in fetch_tasks {
+        let client = client.clone();
+        let sem = semaphore.clone();
+        let mp = mp.clone();
+
+        handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await.unwrap();
+            fetch_payload_async(
+                &client,
+                &task.sha256,
+                &task.url_decoded,
+                &task.cache_path,
+                &mp,
+            )
+            .await
+        }));
+    }
+
+    for handle in handles {
+        handle.await.unwrap()?;
+    }
+
+    // --- Pass 3: Sequential install (everything is cached) ---
     let mut save_cab_lines: Vec<String> = Vec::new();
 
     for line in lock_file_content.lines() {
@@ -122,16 +193,17 @@ fn install_from_lock_file(
 
         // Skip payloads for non-native architectures
         if let Some(host_arch_limit) = parsed.host_arch_limit()
-            && Arch::native() != Some(host_arch_limit) {
-                let name = basename_from_url(&parsed.url_decoded);
-                log::info!(
-                    "skipping payload '{}' arch {} != host arch {:?}",
-                    name,
-                    host_arch_limit,
-                    Arch::native()
-                );
-                continue;
-            }
+            && Arch::native() != Some(host_arch_limit)
+        {
+            let name = basename_from_url(&parsed.url_decoded);
+            log::info!(
+                "skipping payload '{}' arch {} != host arch {:?}",
+                name,
+                host_arch_limit,
+                Arch::native()
+            );
+            continue;
+        }
 
         match &parsed.url_kind {
             LockFilePayloadKind::TopLevel(payload_msvcup_pkg) => {
@@ -140,7 +212,6 @@ fn install_from_lock_file(
 
                 let install_path = msvcup_dir.path(&[&payload_msvcup_pkg.pool_string()]);
                 install_payload(
-                    client,
                     &install_path,
                     lock_file_path,
                     cache_dir,
@@ -164,12 +235,12 @@ fn install_from_lock_file(
     Ok(InstallResult::Success)
 }
 
-fn fetch_payload(
-    client: &reqwest::blocking::Client,
-    _cache_dir: &str,
+async fn fetch_payload_async(
+    client: &reqwest::Client,
     sha256: &Sha256,
     url_decoded: &str,
     cache_path: &Path,
+    mp: &MultiProgress,
 ) -> Result<()> {
     let cache_lock_path = format!("{}.lock", cache_path.display());
     let _cache_lock = LockFile::lock(&cache_lock_path)?;
@@ -179,7 +250,7 @@ fn fetch_payload(
     } else {
         log::debug!("FETCHING         | {} {}", url_decoded, sha256);
         let fetch_path = PathBuf::from(format!("{}.fetching", cache_path.display()));
-        let actual_sha256 = fetch(client, url_decoded, &fetch_path)?;
+        let actual_sha256 = fetch(client, url_decoded, &fetch_path, Some(mp)).await?;
         if actual_sha256 != *sha256 {
             log::error!(
                 "SHA256 mismatch:\nexpected: {}\nactual  : {}",
@@ -200,7 +271,6 @@ fn cache_entry_path(cache_dir: &str, sha256: &Sha256, name: &str) -> PathBuf {
 
 #[allow(clippy::too_many_arguments)]
 fn install_payload(
-    client: &reqwest::blocking::Client,
     install_dir_path: &Path,
     lock_file_path: &str,
     cache_dir: &str,
@@ -232,29 +302,6 @@ fn install_payload(
         );
         return Ok(());
     }
-
-    // Fetch cab files first
-    for line in cabs.lines() {
-        if line.is_empty() {
-            continue;
-        }
-        let parsed = parse_lock_file_payload(lock_file_path, 0, line)?;
-        let cab_cache_path = cache_entry_path(
-            cache_dir,
-            &parsed.sha256,
-            basename_from_url(&parsed.url_decoded),
-        );
-        fetch_payload(
-            client,
-            cache_dir,
-            &parsed.sha256,
-            &parsed.url_decoded,
-            &cab_cache_path,
-        )?;
-    }
-
-    // Fetch the main payload
-    fetch_payload(client, cache_dir, sha256, url_decoded, &cache_path)?;
 
     // Create install lock
     let install_lock_path = install_dir_path.join(".lock");
@@ -605,7 +652,6 @@ fn update_file(path: &Path, content: &[u8]) -> Result<()> {
 }
 
 pub fn update_lock_file(
-    _client: &reqwest::blocking::Client,
     msvcup_pkgs: &[MsvcupPackage],
     lock_file_path: &str,
     pkgs: &Packages,

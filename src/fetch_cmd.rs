@@ -1,19 +1,18 @@
 use crate::lock_file::LockFile;
-use crate::manifest::{fetch, MsvcupDir};
+use crate::manifest::{MsvcupDir, fetch};
 use crate::sha::Sha256;
 use crate::util::basename_from_url;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::fs;
 use std::path::PathBuf;
 
-pub fn fetch_command(
-    client: &reqwest::blocking::Client,
+pub async fn fetch_command(
+    client: &reqwest::Client,
     url: &str,
     cache_dir: Option<&str>,
 ) -> Result<()> {
     // Validate URL
-    let _uri = url::Url::parse(url)
-        .map_err(|e| anyhow::anyhow!("invalid URL '{}': {}", url, e))?;
+    let _uri = url::Url::parse(url).map_err(|e| anyhow::anyhow!("invalid URL '{}': {}", url, e))?;
 
     // Validate it's a known package URL
     match crate::extra::parse_url(url) {
@@ -40,7 +39,7 @@ pub fn fetch_command(
 
     let _cache_lock = LockFile::lock(&cache_lock_path)?;
 
-    let sha256 = fetch(client, url, &cache_path)?;
+    let sha256 = fetch(client, url, &cache_path, None).await?;
 
     // Move to proper cache location
     finish_cache_fetch(cache_dir_str, url, &sha256, &cache_path)?;
