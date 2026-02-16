@@ -1,0 +1,41 @@
+[package]
+name = "msvcup"
+version = "0.1.0"
+edition = "2024"
+description = "A standalone tool for installing the MSVC toolchain and Windows SDK without Visual Studio"
+license = "BSD-3-Clause"
+repository = "https://github.com/wolfv/msvcup"
+readme = "README.md"
+keywords = ["msvc", "windows", "sdk", "toolchain", "build"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "msvcup"
+path = "src/main.rs"
+
+[[bin]]
+name = "msvcup-autoenv"
+path = "src/bin/autoenv.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+env_logger = "0.11"
+fs2 = "0.4"
+hex = "0.4"
+log = "0.4"
+percent-encoding = "2"
+reqwest = { version = "0.12", features = ["blocking"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+url = "2"
+walkdir = "2.5.0"
+zip = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
