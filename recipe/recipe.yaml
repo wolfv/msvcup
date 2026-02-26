@@ -33,9 +33,6 @@ outputs:
     requirements:
       build:
         - ${{ compiler('rust') }}
-        - ${{ compiler('c') }}
-      host:
-        - openssl
     tests:
       - package_contents:
           bin:
