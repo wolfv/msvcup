@@ -5,12 +5,12 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-struct Tool {
-    name: &'static str,
-    cmake_names: &'static [&'static str],
+pub struct Tool {
+    pub name: &'static str,
+    pub cmake_names: &'static [&'static str],
 }
 
-const MSVC_TOOLS: &[Tool] = &[
+pub const MSVC_TOOLS: &[Tool] = &[
     Tool {
         name: "cl",
         cmake_names: &["C_COMPILER", "CXX_COMPILER"],
@@ -29,7 +29,7 @@ const MSVC_TOOLS: &[Tool] = &[
     },
 ];
 
-const SDK_TOOLS: &[Tool] = &[
+pub const SDK_TOOLS: &[Tool] = &[
     Tool {
         name: "rc",
         cmake_names: &["RC_COMPILER"],
@@ -121,7 +121,7 @@ pub fn autoenv_command(
     Ok(())
 }
 
-fn generate_toolchain_cmake(target_cpu: Arch, has_msvc: bool, has_sdk: bool) -> String {
+pub fn generate_toolchain_cmake(target_cpu: Arch, has_msvc: bool, has_sdk: bool) -> String {
     let mut content = String::new();
     content.push_str("set(CMAKE_SYSTEM_NAME Windows)\n");
 

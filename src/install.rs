@@ -329,23 +329,15 @@ fn install_payload(
             )?;
         }
         LockFileUrlKind::Msi => {
-            // MSI installation requires msiexec on Windows
-            if cfg!(windows) {
-                install_msi(
-                    &cache_path,
-                    install_dir_path,
-                    lock_file_path,
-                    cache_dir,
-                    cabs,
-                    url_decoded,
-                    &mut manifest_file,
-                )?;
-            } else {
-                log::warn!(
-                    "MSI installation is only supported on Windows, skipping '{}'",
-                    url_decoded
-                );
-            }
+            install_msi(
+                &cache_path,
+                install_dir_path,
+                lock_file_path,
+                cache_dir,
+                cabs,
+                url_decoded,
+                &mut manifest_file,
+            )?;
         }
         LockFileUrlKind::Cab => unreachable!(),
     }
@@ -411,29 +403,20 @@ fn end_install(installed_manifest_path: &Path, current_install_path: &Path) -> R
     Ok(())
 }
 
-#[cfg(windows)]
 fn install_msi(
     msi_path: &Path,
     install_dir_path: &Path,
     lock_file_path: &str,
     cache_dir: &str,
     cabs: &str,
-    url_decoded: &str,
+    _url_decoded: &str,
     manifest_file: &mut fs::File,
 ) -> Result<()> {
-    use std::process::Command;
-
+    // Stage external CAB files into a temporary directory alongside the MSI
     let staging_dir = install_dir_path.join(".msi-staging");
     let _ = fs::remove_dir_all(&staging_dir);
+    fs::create_dir_all(&staging_dir)?;
 
-    let installer_path = staging_dir.join("installer");
-    fs::create_dir_all(&installer_path)?;
-
-    // Copy MSI file
-    let msi_copy = installer_path.join(basename_from_url(url_decoded));
-    fs::copy(msi_path, &msi_copy)?;
-
-    // Copy cab files
     for line in cabs.lines() {
         if line.is_empty() {
             continue;
@@ -445,7 +428,7 @@ fn install_msi(
                 &parsed.sha256,
                 basename_from_url(&parsed.url_decoded),
             );
-            let dest = installer_path.join(cab_path.trim());
+            let dest = staging_dir.join(cab_path.trim());
             if let Some(parent) = dest.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -453,82 +436,11 @@ fn install_msi(
         }
     }
 
-    // Run msiexec
-    let target_dir = staging_dir.join("target");
-    let target_dir_arg = format!("TARGETDIR={}", target_dir.display());
-    log::info!("running msiexec for '{}'...", msi_copy.display());
-
-    let output = Command::new("msiexec.exe")
-        .args([
-            "/a",
-            msi_copy.to_str().unwrap(),
-            "/quiet",
-            "/qn",
-            &target_dir_arg,
-        ])
-        .output()?;
-
-    if !output.status.success() {
-        bail!(
-            "msiexec for '{}' failed with exit code {:?}",
-            msi_copy.display(),
-            output.status.code()
-        );
-    }
-
-    // Install files from staging to install dir
-    install_dir_recursive(
-        &target_dir,
-        install_dir_path,
-        basename_from_url(url_decoded),
-        manifest_file,
-    )?;
+    crate::msi_extract::extract_msi(msi_path, install_dir_path, &staging_dir, manifest_file)?;
 
     // Clean up staging
     let _ = fs::remove_dir_all(&staging_dir);
 
-    Ok(())
-}
-
-#[cfg(not(windows))]
-fn install_msi(
-    _msi_path: &Path,
-    _install_dir_path: &Path,
-    _lock_file_path: &str,
-    _cache_dir: &str,
-    _cabs: &str,
-    _url_decoded: &str,
-    _manifest_file: &mut fs::File,
-) -> Result<()> {
-    log::warn!("MSI installation is only supported on Windows");
-    Ok(())
-}
-
-#[cfg(windows)]
-fn install_dir_recursive(
-    source_dir: &Path,
-    install_dir: &Path,
-    root_exclude: &str,
-    manifest_file: &mut fs::File,
-) -> Result<()> {
-    for entry in walkdir::WalkDir::new(source_dir).into_iter().flatten() {
-        let rel_path = entry.path().strip_prefix(source_dir)?;
-        if rel_path.to_str() == Some(root_exclude) {
-            continue;
-        }
-        if entry.file_type().is_file() {
-            let install_path = install_dir.join(rel_path);
-            if install_path.exists() {
-                writeln!(manifest_file, "add {}", install_path.display())?;
-            } else {
-                writeln!(manifest_file, "new {}", install_path.display())?;
-                if let Some(parent) = install_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::copy(entry.path(), &install_path)?;
-            }
-        }
-    }
     Ok(())
 }
 

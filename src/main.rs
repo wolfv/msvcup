@@ -1,13 +1,16 @@
 mod arch;
 mod autoenv_cmd;
 mod channel_kind;
+mod config;
 mod extra;
 mod fetch_cmd;
 mod install;
 mod lock_file;
 mod lockfile_parse;
 mod manifest;
+mod msi_extract;
 mod packages;
+mod resolve_cmd;
 mod sha;
 mod util;
 mod zip_extract;
@@ -56,6 +59,18 @@ enum Commands {
         out_dir: String,
         /// Packages
         packages: Vec<String>,
+    },
+    /// Resolve packages and place shim executables that install on first use
+    Resolve {
+        /// Path to msvcup.toml config file
+        #[arg(long)]
+        config: String,
+        /// Output directory for shim executables
+        #[arg(long)]
+        out_dir: String,
+        /// Manifest update policy
+        #[arg(long, value_parser = parse_manifest_update, default_value = "off")]
+        manifest_update: ManifestUpdate,
     },
     /// Fetch a package URL
     Fetch {
@@ -129,6 +144,14 @@ async fn main() -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("invalid --target-cpu '{}'", target_cpu))?;
             let pkgs = parse_msvcup_packages(&pkg_strings)?;
             autoenv_cmd::autoenv_command(&pkgs, target_cpu, &out_dir)
+        }
+        Commands::Resolve {
+            config,
+            out_dir,
+            manifest_update,
+        } => {
+            resolve_cmd::resolve_command(&client, &msvcup_dir, &config, &out_dir, manifest_update)
+                .await
         }
         Commands::Fetch { url, cache_dir } => {
             fetch_cmd::fetch_command(&client, &url, cache_dir.as_deref()).await
