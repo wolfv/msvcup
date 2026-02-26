@@ -29,10 +29,13 @@ outputs:
       version: ${{ version }}
     build:
       script:
-        - cargo install --locked --path . --root ${{ PREFIX }} --no-track
+        - cargo install --locked --path . --root ${{ PREFIX }} --no-track --no-default-features --features native-tls
     requirements:
       build:
         - ${{ compiler('rust') }}
+        - ${{ compiler('c') }}
+      host:
+        - openssl
     tests:
       - package_contents:
           bin:
@@ -49,8 +52,9 @@ outputs:
       skip:
         - not win64
       script:
-        - mkdir -p %PREFIX%\etc\conda\activate.d
-        - mkdir -p %PREFIX%\etc\conda\deactivate.d
+        - if not exist "%PREFIX%\etc\conda\activate.d" mkdir "%PREFIX%\etc\conda\activate.d"
+        - if not exist "%PREFIX%\etc\conda\deactivate.d" mkdir "%PREFIX%\etc\conda\deactivate.d"
+        - if not exist "%PREFIX%\bin" mkdir "%PREFIX%\bin"
         # Write msvcup.toml config
         - |
           (
@@ -122,8 +126,9 @@ outputs:
       skip:
         - not (win and arm64)
       script:
-        - mkdir -p %PREFIX%\etc\conda\activate.d
-        - mkdir -p %PREFIX%\etc\conda\deactivate.d
+        - if not exist "%PREFIX%\etc\conda\activate.d" mkdir "%PREFIX%\etc\conda\activate.d"
+        - if not exist "%PREFIX%\etc\conda\deactivate.d" mkdir "%PREFIX%\etc\conda\deactivate.d"
+        - if not exist "%PREFIX%\bin" mkdir "%PREFIX%\bin"
         - |
           (
             echo [msvcup]
