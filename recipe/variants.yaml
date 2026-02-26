@@ -1,0 +1,10 @@
+c_compiler:
+  - if: win
+    then:
+      - vs2022
+
+rust_compiler:
+  - rust
+
+rust_compiler_version:
+  - 1.93.1
