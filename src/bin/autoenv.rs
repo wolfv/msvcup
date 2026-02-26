@@ -130,12 +130,25 @@ fn config_mode(self_dir: &std::path::Path, self_basename: &str) -> Result<i32, S
     let config: MsvcupConfig = toml::from_str(&config_content)
         .map_err(|e| format!("cannot parse '{}': {e}", config_path.display()))?;
 
-    let install_dir = config.msvcup.install_dir.as_deref().unwrap_or("C:\\msvcup");
+    let default_install_dir;
+    let default_cache_dir;
+    if let Ok(userprofile) = env::var("USERPROFILE") {
+        default_install_dir = format!("{}\\.msvcup", userprofile);
+        default_cache_dir = format!("{}\\.msvcup\\cache", userprofile);
+    } else {
+        default_install_dir = "C:\\msvcup".to_string();
+        default_cache_dir = "C:\\msvcup\\cache".to_string();
+    }
+    let install_dir = config
+        .msvcup
+        .install_dir
+        .as_deref()
+        .unwrap_or(&default_install_dir);
     let cache_dir = config
         .msvcup
         .cache_dir
         .as_deref()
-        .unwrap_or("C:\\msvcup\\cache");
+        .unwrap_or(&default_cache_dir);
     let target_arch = config.msvcup.target_arch.as_str();
 
     // Resolve the lock file path relative to the config

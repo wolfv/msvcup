@@ -11,7 +11,6 @@ from pathlib import Path
 
 prefix = Path(os.environ["PREFIX"])
 recipe_dir = Path(os.environ["RECIPE_DIR"])
-userprofile = os.environ["USERPROFILE"]
 
 # Usage: install_vs.py <target_arch> <msvc_version> <sdk_version> <vs_year> <vs_ver>
 target_arch, msvc_version, sdk_version, vs_year, vs_ver = sys.argv[1:6]
@@ -21,15 +20,11 @@ target_arch, msvc_version, sdk_version, vs_year, vs_ver = sys.argv[1:6]
 (prefix / "etc" / "conda" / "deactivate.d").mkdir(parents=True, exist_ok=True)
 (prefix / "bin").mkdir(parents=True, exist_ok=True)
 
-# Write msvcup.toml with forward slashes (avoids TOML unicode escape issues)
-install_dir = f"{userprofile}/.msvcup".replace("\\", "/")
-cache_dir = f"{userprofile}/.msvcup/cache".replace("\\", "/")
-
+# Write msvcup.toml — omit install_dir and cache_dir so they resolve
+# at runtime from USERPROFILE (defaults in the autoenv binary)
 toml_path = prefix / "bin" / "msvcup.toml"
 toml_path.write_text(f"""\
 [msvcup]
-install_dir = "{install_dir}"
-cache_dir = "{cache_dir}"
 lock_file = "msvc.lock"
 target_arch = "{target_arch}"
 

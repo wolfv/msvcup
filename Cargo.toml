@@ -1,6 +1,6 @@
 [package]
 name = "msvcup"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A standalone tool for installing the MSVC toolchain and Windows SDK without Visual Studio"
 license = "BSD-3-Clause"

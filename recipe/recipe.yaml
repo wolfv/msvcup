@@ -4,7 +4,7 @@ context:
   # MSVC toolchain version (build version from VS manifest)
   msvc_version: "14.44.17.14"
   # Windows SDK version
-  sdk_version: "10.0.26100.7"
+  sdk_version: "10.0.26100.15"
   # VS year / version identifiers
   vsyear: "2022"
   vsver: "17"

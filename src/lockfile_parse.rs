@@ -211,10 +211,16 @@ pub fn check_lock_file_pkgs(
         }
     }
 
-    if msvcup_pkg_index + 1 < msvcup_pkgs.len() || msvcup_pkg_match_count == 0 {
+    if msvcup_pkg_match_count == 0 {
         return Some(format!(
             "lock file is missing package '{}'",
             msvcup_pkgs[msvcup_pkg_index]
+        ));
+    }
+    if msvcup_pkg_index + 1 < msvcup_pkgs.len() {
+        return Some(format!(
+            "lock file is missing package '{}'",
+            msvcup_pkgs[msvcup_pkg_index + 1]
         ));
     }
     None

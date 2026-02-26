@@ -617,6 +617,18 @@ pub fn update_lock_file(
 
     log::warn!("TODO: add the dependencies for all the packages we've added");
 
+    // Verify every requested package has at least one payload
+    for msvcup_pkg in msvcup_pkgs {
+        let has_payload = install_payloads.iter().any(|(pkg, _)| pkg == msvcup_pkg);
+        if !has_payload {
+            bail!(
+                "package '{}' not found in the VS manifest. \
+                 Run 'msvcup list' to see available versions.",
+                msvcup_pkg
+            );
+        }
+    }
+
     // Write lock file
     log::info!("{} payloads:", install_payloads.len());
     if let Some(dir) = Path::new(lock_file_path).parent() {
