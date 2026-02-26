@@ -191,7 +191,7 @@ outputs:
         - not win64
     requirements:
       run:
-        - vs${{ vsyear }}_win-64 ${{ cl_version }}
+        - vs${{ vsyear }}_win-64 ==${{ cl_version }}
     tests:
       - script:
           - echo vs_win-64 installed
@@ -205,7 +205,7 @@ outputs:
         - not (win and arm64)
     requirements:
       run:
-        - vs${{ vsyear }}_win-arm64 ${{ cl_version }}
+        - vs${{ vsyear }}_win-arm64 ==${{ cl_version }}
     tests:
       - script:
           - echo vs_win-arm64 installed
