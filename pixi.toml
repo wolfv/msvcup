@@ -1,0 +1,12 @@
+[workspace]
+authors = ["Wolf Vollprecht <w.vollprecht@gmail.com>"]
+channels = ["conda-forge"]
+name = "msvcup"
+platforms = ["win-64", "osx-arm64", "linux-64", "linux-aarch64"]
+version = "0.1.0"
+
+[tasks]
+build = "rattler-build build --recipe recipe/recipe.yaml"
+
+[dependencies]
+rattler-build = ">=0.58.1,<0.59"

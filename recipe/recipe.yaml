@@ -1,6 +1,6 @@
 context:
   name: msvcup
-  version: ${{ load_from_file("../Cargo.toml").package.version }}
+  version: "0.1.0"
   # MSVC toolchain version (build version from VS manifest)
   msvc_version: "14.44.17.14"
   # Windows SDK version
