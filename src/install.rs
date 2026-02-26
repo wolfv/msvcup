@@ -78,7 +78,7 @@ pub async fn install_command(
 
     let pkgs = get_packages(vsman_path.to_str().unwrap(), &vsman_content)?;
 
-    update_lock_file(msvcup_pkgs, lock_file_path, &pkgs, cache_dir_str)?;
+    update_lock_file(msvcup_pkgs, lock_file_path, &pkgs)?;
 
     let lock_file_content = fs::read_to_string(lock_file_path)
         .with_context(|| format!("reading lock file '{}' after update", lock_file_path))?;
@@ -117,14 +117,23 @@ async fn install_from_lock_file(
     lock_file_path: &str,
     lock_file_content: &str,
 ) -> Result<()> {
-    // --- Pass 1: Parse lock file and collect all fetch tasks ---
+    // --- Pass 1: Parse lock file, collect non-cab fetch tasks and build cab info map ---
     let mut fetch_tasks: Vec<FetchTask> = Vec::new();
+    // cab_filename -> (url, sha256) for lazy fetching during MSI install
+    let mut cab_info: std::collections::HashMap<String, (String, Sha256)> =
+        std::collections::HashMap::new();
 
     for line in lock_file_content.lines() {
         if line.is_empty() {
             continue;
         }
         let parsed = parse_lock_file_payload(lock_file_path, 0, line)?;
+
+        if let LockFilePayloadKind::Cab(cab_path) = &parsed.url_kind {
+            let cab_filename = cab_path.trim().to_string();
+            cab_info.insert(cab_filename, (parsed.url_decoded, parsed.sha256));
+            continue;
+        }
 
         // Skip payloads for non-native architectures
         if let Some(host_arch_limit) = parsed.host_arch_limit()
@@ -143,7 +152,7 @@ async fn install_from_lock_file(
         });
     }
 
-    // --- Pass 2: Parallel fetch all payloads ---
+    // --- Pass 2: Parallel fetch non-cab payloads ---
     let mp = MultiProgress::new();
     let semaphore = std::sync::Arc::new(Semaphore::new(MAX_CONCURRENT_DOWNLOADS));
 
@@ -170,14 +179,17 @@ async fn install_from_lock_file(
         handle.await.unwrap()?;
     }
 
-    // --- Pass 3: Sequential install (everything is cached) ---
-    let mut save_cab_lines: Vec<String> = Vec::new();
-
+    // --- Pass 3: Sequential install (everything except cabs is cached) ---
     for line in lock_file_content.lines() {
         if line.is_empty() {
             continue;
         }
         let parsed = parse_lock_file_payload(lock_file_path, 0, line)?;
+
+        // Skip cab lines
+        if matches!(&parsed.url_kind, LockFilePayloadKind::Cab(_)) {
+            continue;
+        }
 
         // Skip payloads for non-native architectures
         if let Some(host_arch_limit) = parsed.host_arch_limit()
@@ -193,25 +205,19 @@ async fn install_from_lock_file(
             continue;
         }
 
-        match &parsed.url_kind {
-            LockFilePayloadKind::TopLevel(payload_msvcup_pkg) => {
-                let cabs_content = save_cab_lines.join("\n");
-                save_cab_lines.clear();
-
-                let install_path = msvcup_dir.path(&[&payload_msvcup_pkg.pool_string()]);
-                install_payload(
-                    &install_path,
-                    lock_file_path,
-                    cache_dir,
-                    &parsed.url_decoded,
-                    &parsed.sha256,
-                    parsed.strip_root_dir(),
-                    &cabs_content,
-                )?;
-            }
-            LockFilePayloadKind::Cab(_) => {
-                save_cab_lines.push(line.to_string());
-            }
+        if let LockFilePayloadKind::TopLevel(payload_msvcup_pkg) = &parsed.url_kind {
+            let install_path = msvcup_dir.path(&[&payload_msvcup_pkg.pool_string()]);
+            install_payload(
+                client,
+                &install_path,
+                cache_dir,
+                &parsed.url_decoded,
+                &parsed.sha256,
+                parsed.strip_root_dir(),
+                &cab_info,
+                &mp,
+            )
+            .await?;
         }
     }
 
@@ -257,15 +263,15 @@ fn cache_entry_path(cache_dir: &str, sha256: &Sha256, name: &str) -> PathBuf {
     PathBuf::from(cache_dir).join(basename)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn install_payload(
+async fn install_payload(
+    client: &reqwest::Client,
     install_dir_path: &Path,
-    lock_file_path: &str,
     cache_dir: &str,
     url_decoded: &str,
     sha256: &Sha256,
     strip_root_dir: bool,
-    cabs: &str,
+    cab_info: &std::collections::HashMap<String, (String, Sha256)>,
+    mp: &MultiProgress,
 ) -> Result<()> {
     let url_kind = get_lock_file_url_kind(url_decoded).ok_or_else(|| {
         anyhow::anyhow!(
@@ -330,14 +336,15 @@ fn install_payload(
         }
         LockFileUrlKind::Msi => {
             install_msi(
+                client,
                 &cache_path,
                 install_dir_path,
-                lock_file_path,
                 cache_dir,
-                cabs,
-                url_decoded,
+                cab_info,
+                mp,
                 &mut manifest_file,
-            )?;
+            )
+            .await?;
         }
         LockFileUrlKind::Cab => unreachable!(),
     }
@@ -403,36 +410,37 @@ fn end_install(installed_manifest_path: &Path, current_install_path: &Path) -> R
     Ok(())
 }
 
-fn install_msi(
+async fn install_msi(
+    client: &reqwest::Client,
     msi_path: &Path,
     install_dir_path: &Path,
-    lock_file_path: &str,
     cache_dir: &str,
-    cabs: &str,
-    _url_decoded: &str,
+    cab_info: &std::collections::HashMap<String, (String, Sha256)>,
+    mp: &MultiProgress,
     manifest_file: &mut fs::File,
 ) -> Result<()> {
-    // Stage external CAB files into a temporary directory alongside the MSI
+    // Read the MSI's Media table to find which external cabs it needs
+    let cab_names = crate::msi_extract::read_msi_cab_names(msi_path)?;
+
+    // Stage only the needed CAB files
     let staging_dir = install_dir_path.join(".msi-staging");
     let _ = fs::remove_dir_all(&staging_dir);
     fs::create_dir_all(&staging_dir)?;
 
-    for line in cabs.lines() {
-        if line.is_empty() {
-            continue;
+    for cab_name in &cab_names {
+        if cab_name.starts_with('#') {
+            continue; // Embedded cab, handled by msi_extract
         }
-        let parsed = parse_lock_file_payload(lock_file_path, 0, line)?;
-        if let LockFilePayloadKind::Cab(cab_path) = &parsed.url_kind {
-            let cab_cache_path = cache_entry_path(
-                cache_dir,
-                &parsed.sha256,
-                basename_from_url(&parsed.url_decoded),
-            );
-            let dest = staging_dir.join(cab_path.trim());
-            if let Some(parent) = dest.parent() {
-                fs::create_dir_all(parent)?;
+        if let Some((url, sha256)) = cab_info.get(cab_name.as_str()) {
+            let name = basename_from_url(url);
+            let cab_cache_path = cache_entry_path(cache_dir, sha256, name);
+            // Fetch the cab if not already cached
+            fetch_payload_async(client, sha256, url, &cab_cache_path, mp).await?;
+            let dest = staging_dir.join(cab_name);
+            // Use hard link or copy to avoid duplicating data
+            if fs::hard_link(&cab_cache_path, &dest).is_err() {
+                fs::copy(&cab_cache_path, &dest)?;
             }
-            fs::copy(&cab_cache_path, &dest)?;
         }
     }
 
@@ -556,7 +564,6 @@ pub fn update_lock_file(
     msvcup_pkgs: &[MsvcupPackage],
     lock_file_path: &str,
     pkgs: &Packages,
-    _cache_dir: &str,
 ) -> Result<()> {
     // Collect install payloads
     let mut install_payloads: Vec<(MsvcupPackage, usize)> = Vec::new(); // (target, payload_index)
@@ -615,8 +622,6 @@ pub fn update_lock_file(
         }
     }
 
-    log::warn!("TODO: add the dependencies for all the packages we've added");
-
     // Verify every requested package has at least one payload
     for msvcup_pkg in msvcup_pkgs {
         let has_payload = install_payloads.iter().any(|(pkg, _)| pkg == msvcup_pkg);
@@ -629,7 +634,34 @@ pub fn update_lock_file(
         }
     }
 
-    // Write lock file
+    // Collect unique cab payloads for MSI payloads from the VS manifest.
+    // Each VS manifest package lists MSIs and CABs as sibling payloads.
+    // We write unique cabs once per msvcup package group (before the MSIs),
+    // and at install time the MSI's Media table determines which cabs are needed.
+    let mut cab_payload_indices: Vec<usize> = Vec::new();
+    let mut seen_pkg_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+    for (_, payload_index) in &install_payloads {
+        let payload = &pkgs.payloads[*payload_index];
+        if get_lock_file_url_kind(&payload.url_decoded) != Some(LockFileUrlKind::Msi) {
+            continue;
+        }
+        let pkg_index = pkgs.pkg_index_from_payload_index(*payload_index);
+        if !seen_pkg_indices.insert(pkg_index) {
+            continue; // Already collected cabs for this VS manifest package
+        }
+        let pkg_payload_range = pkgs.payload_range_from_pkg_index(pkg_index);
+        for pi in pkg_payload_range {
+            let sibling = &pkgs.payloads[pi];
+            if sibling.file_name.ends_with(".cab") {
+                cab_payload_indices.push(pi);
+            }
+        }
+    }
+    cab_payload_indices.sort();
+    cab_payload_indices.dedup();
+
+    // Write lock file: first all cab entries, then all top-level payloads
     log::info!("{} payloads:", install_payloads.len());
     if let Some(dir) = Path::new(lock_file_path).parent() {
         fs::create_dir_all(dir)?;
@@ -637,12 +669,25 @@ pub fn update_lock_file(
     let lock_file = fs::File::create(lock_file_path)?;
     let mut bw = BufWriter::new(lock_file);
 
+    // Write cab entries first (shared by all MSIs in the package)
+    for &cab_pi in &cab_payload_indices {
+        let cab_payload = &pkgs.payloads[cab_pi];
+        write_payload(
+            &mut bw,
+            None,
+            LockFileUrlKind::Cab,
+            &cab_payload.url_decoded,
+            &cab_payload.sha256,
+            &cab_payload.file_name,
+        )?;
+    }
+
+    // Write top-level payloads (VSIX, MSI, ZIP)
     for (target, payload_index) in &install_payloads {
         let payload = &pkgs.payloads[*payload_index];
         let url_kind = get_lock_file_url_kind(&payload.url_decoded)
             .ok_or_else(|| anyhow::anyhow!("unable to determine payload kind from url"))?;
 
-        // TODO: handle cab files for MSI payloads
         write_payload(
             &mut bw,
             Some(target),
@@ -656,3 +701,4 @@ pub fn update_lock_file(
 
     Ok(())
 }
+

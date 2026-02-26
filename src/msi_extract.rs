@@ -254,6 +254,18 @@ fn read_media_table(package: &mut msi::Package<fs::File>) -> Result<Vec<MediaEnt
     Ok(entries)
 }
 
+/// Read the cabinet names from an MSI's Media table without extracting.
+pub fn read_msi_cab_names(msi_path: &Path) -> Result<Vec<String>> {
+    let mut package = msi::open(msi_path)
+        .with_context(|| format!("opening MSI file '{}'", msi_path.display()))?;
+    let entries = read_media_table(&mut package)?;
+    Ok(entries
+        .into_iter()
+        .filter(|e| !e.cabinet.is_empty())
+        .map(|e| e.cabinet)
+        .collect())
+}
+
 /// Resolve a directory ID to a full path by walking the Directory table parent chain.
 fn resolve_directory_path(
     dir_id: &str,
