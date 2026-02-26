@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -17,6 +17,10 @@ pub fn extract_msi(
     cab_dir: &Path,
     manifest_file: &mut fs::File,
 ) -> Result<()> {
+    let msi_name = msi_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
     let mut package = msi::open(msi_path)
         .with_context(|| format!("opening MSI file '{}'", msi_path.display()))?;
 
@@ -32,6 +36,15 @@ pub fn extract_msi(
     // Parse the Media table to find CAB file names
     let media_entries = read_media_table(&mut package)?;
 
+    log::info!(
+        "  [{}] tables: {} dirs, {} components, {} files, {} media entries",
+        msi_name,
+        directory_table.len(),
+        component_table.len(),
+        file_table.len(),
+        media_entries.len(),
+    );
+
     let mut extracted_count = 0u32;
 
     // Try external CABs first (referenced in Media table)
@@ -43,9 +56,10 @@ pub fn extract_msi(
         let cab_name = &media.cabinet;
         let cab_path = cab_dir.join(cab_name);
         if cab_path.exists() {
+            log::info!("  [{}] extracting external CAB '{}'", msi_name, cab_name);
             let cab_file = fs::File::open(&cab_path)
                 .with_context(|| format!("opening CAB file '{}'", cab_path.display()))?;
-            extracted_count += extract_cab(
+            let count = extract_cab(
                 cab_file,
                 install_dir,
                 &file_table,
@@ -54,24 +68,39 @@ pub fn extract_msi(
                 manifest_file,
             )
             .with_context(|| format!("extracting CAB '{}'", cab_path.display()))?;
+            log::info!("  [{}] extracted {} files from '{}'", msi_name, count, cab_name);
+            extracted_count += count;
             found_external = true;
+        } else {
+            log::debug!(
+                "  [{}] external CAB '{}' not found at '{}'",
+                msi_name,
+                cab_name,
+                cab_path.display()
+            );
         }
     }
 
     if found_external {
-        log::info!("extracted {} files from external CAB(s)", extracted_count);
+        log::info!(
+            "  [{}] done: {} files from external CAB(s)",
+            msi_name,
+            extracted_count
+        );
         return Ok(());
     }
 
     // Fall back to embedded CAB streams
-    // Embedded CABs in MSI have stream names that start with a non-printable character
-    // or are listed in the Media table with a '#' prefix
     let stream_names: Vec<String> = package.streams().map(|s| s.to_string()).collect();
+    log::debug!(
+        "  [{}] no external CABs found, checking {} streams for embedded CABs",
+        msi_name,
+        stream_names.len()
+    );
     for media in &media_entries {
         if media.cabinet.is_empty() {
             continue;
         }
-        // Embedded CABs are referenced with a '#' prefix in the Media table
         let stream_name = if media.cabinet.starts_with('#') {
             &media.cabinet[1..]
         } else {
@@ -79,6 +108,11 @@ pub fn extract_msi(
         };
 
         if stream_names.iter().any(|s| s == stream_name) {
+            log::info!(
+                "  [{}] extracting embedded CAB stream '{}'",
+                msi_name,
+                stream_name
+            );
             let mut reader = package
                 .read_stream(stream_name)
                 .with_context(|| format!("reading embedded stream '{}'", stream_name))?;
@@ -86,7 +120,7 @@ pub fn extract_msi(
             reader.read_to_end(&mut cab_data)?;
 
             let cursor = io::Cursor::new(cab_data);
-            extracted_count += extract_cab(
+            let count = extract_cab(
                 cursor,
                 install_dir,
                 &file_table,
@@ -95,6 +129,13 @@ pub fn extract_msi(
                 manifest_file,
             )
             .with_context(|| format!("extracting embedded CAB '{}'", stream_name))?;
+            log::info!(
+                "  [{}] extracted {} files from embedded '{}'",
+                msi_name,
+                count,
+                stream_name
+            );
+            extracted_count += count;
         }
     }
 
@@ -113,12 +154,16 @@ pub fn extract_msi(
                 continue;
             }
 
-            log::info!("found embedded CAB in stream '{}'", name);
+            log::info!(
+                "  [{}] found CAB signature in stream '{}'",
+                msi_name,
+                name
+            );
             let mut cab_data = sig.to_vec();
             reader.read_to_end(&mut cab_data)?;
 
             let cursor = io::Cursor::new(cab_data);
-            extracted_count += extract_cab(
+            let count = extract_cab(
                 cursor,
                 install_dir,
                 &file_table,
@@ -126,14 +171,32 @@ pub fn extract_msi(
                 &directory_table,
                 manifest_file,
             )?;
+            log::info!(
+                "  [{}] extracted {} files from stream '{}'",
+                msi_name,
+                count,
+                name
+            );
+            extracted_count += count;
         }
     }
 
     if extracted_count == 0 {
-        bail!("no CAB files found in MSI (neither external nor embedded)");
+        if file_table.is_empty() {
+            log::info!(
+                "  [{}] no files in File table, nothing to extract (metadata-only MSI)",
+                msi_name
+            );
+        } else {
+            log::warn!(
+                "  [{}] File table has {} entries but no CAB files found (neither external nor embedded)",
+                msi_name,
+                file_table.len()
+            );
+        }
+    } else {
+        log::info!("  [{}] done: extracted {} files total", msi_name, extracted_count);
     }
-
-    log::info!("extracted {} files from MSI", extracted_count);
     Ok(())
 }
 
