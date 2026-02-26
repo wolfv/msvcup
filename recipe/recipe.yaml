@@ -33,6 +33,13 @@ outputs:
     requirements:
       build:
         - ${{ compiler('rust') }}
+        - if: linux
+          then:
+            - ${{ compiler('c') }}
+      host:
+        - if: linux
+          then: 
+            - openssl
     tests:
       - package_contents:
           bin:
@@ -49,51 +56,11 @@ outputs:
       skip:
         - not win64
       script:
-        - if not exist "%PREFIX%\etc\conda\activate.d" mkdir "%PREFIX%\etc\conda\activate.d"
-        - if not exist "%PREFIX%\etc\conda\deactivate.d" mkdir "%PREFIX%\etc\conda\deactivate.d"
-        - if not exist "%PREFIX%\bin" mkdir "%PREFIX%\bin"
-        # Write msvcup.toml config
-        - |
-          (
-            echo [msvcup]
-            echo install_dir = "%USERPROFILE%\\.msvcup"
-            echo cache_dir = "%USERPROFILE%\\.msvcup\\cache"
-            echo lock_file = "msvc.lock"
-            echo target_arch = "x64"
-            echo.
-            echo [packages]
-            echo msvc = "${{ msvc_version }}"
-            echo sdk = "${{ sdk_version }}"
-          ) > %PREFIX%\bin\msvcup.toml
-        # Run resolve to generate lock file and place shim executables
-        - msvcup resolve --config %PREFIX%\bin\msvcup.toml --out-dir %PREFIX%\bin --manifest-update always
-        # Write activation script
-        - |
-          (
-            echo @echo off
-            echo set "CC=cl.exe"
-            echo set "CXX=cl.exe"
-            echo set "DISTUTILS_USE_SDK=1"
-            echo set "MSSdk=1"
-            echo set "VS_VERSION=${{ vsver }}.0"
-            echo set "VS_MAJOR=${{ vsver }}"
-            echo set "VS_YEAR=${{ vsyear }}"
-          ) > %PREFIX%\etc\conda\activate.d\vs${{ vsyear }}_activate.bat
-        # Write deactivation script
-        - |
-          (
-            echo @echo off
-            echo set "CC="
-            echo set "CXX="
-            echo set "DISTUTILS_USE_SDK="
-            echo set "MSSdk="
-            echo set "VS_VERSION="
-            echo set "VS_MAJOR="
-            echo set "VS_YEAR="
-          ) > %PREFIX%\etc\conda\deactivate.d\vs${{ vsyear }}_deactivate.bat
+        - python %RECIPE_DIR%\install_vs.py x64 ${{ msvc_version }} ${{ sdk_version }} ${{ vsyear }} ${{ vsver }}
     requirements:
       build:
         - ${{ name }}
+        - python >=3.6
       run:
         - ${{ name }}
       run_exports:
@@ -123,47 +90,11 @@ outputs:
       skip:
         - not (win and arm64)
       script:
-        - if not exist "%PREFIX%\etc\conda\activate.d" mkdir "%PREFIX%\etc\conda\activate.d"
-        - if not exist "%PREFIX%\etc\conda\deactivate.d" mkdir "%PREFIX%\etc\conda\deactivate.d"
-        - if not exist "%PREFIX%\bin" mkdir "%PREFIX%\bin"
-        - |
-          (
-            echo [msvcup]
-            echo install_dir = "%USERPROFILE%\\.msvcup"
-            echo cache_dir = "%USERPROFILE%\\.msvcup\\cache"
-            echo lock_file = "msvc.lock"
-            echo target_arch = "arm64"
-            echo.
-            echo [packages]
-            echo msvc = "${{ msvc_version }}"
-            echo sdk = "${{ sdk_version }}"
-          ) > %PREFIX%\bin\msvcup.toml
-        - msvcup resolve --config %PREFIX%\bin\msvcup.toml --out-dir %PREFIX%\bin --manifest-update always
-        - |
-          (
-            echo @echo off
-            echo set "CC=cl.exe"
-            echo set "CXX=cl.exe"
-            echo set "DISTUTILS_USE_SDK=1"
-            echo set "MSSdk=1"
-            echo set "VS_VERSION=${{ vsver }}.0"
-            echo set "VS_MAJOR=${{ vsver }}"
-            echo set "VS_YEAR=${{ vsyear }}"
-          ) > %PREFIX%\etc\conda\activate.d\vs${{ vsyear }}_activate.bat
-        - |
-          (
-            echo @echo off
-            echo set "CC="
-            echo set "CXX="
-            echo set "DISTUTILS_USE_SDK="
-            echo set "MSSdk="
-            echo set "VS_VERSION="
-            echo set "VS_MAJOR="
-            echo set "VS_YEAR="
-          ) > %PREFIX%\etc\conda\deactivate.d\vs${{ vsyear }}_deactivate.bat
+        - python %RECIPE_DIR%\install_vs.py arm64 ${{ msvc_version }} ${{ sdk_version }} ${{ vsyear }} ${{ vsver }}
     requirements:
       build:
         - ${{ name }}
+        - python >=3.6
       run:
         - ${{ name }}
       run_exports:
