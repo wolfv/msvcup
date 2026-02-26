@@ -54,5 +54,3 @@ jobs:
         run: |
           find packages -name '*.conda' -exec \
             pixi run rattler-build upload prefix -c automsvc {} \;
-        env:
-          PREFIX_API_KEY: ${{ secrets.PREFIX_API_KEY }}
