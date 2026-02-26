@@ -1,0 +1,38 @@
+context:
+  name: msvcup
+  version: ${{ load_from_file("../Cargo.toml").package.version }}
+
+package:
+  name: ${{ name }}
+  version: ${{ version }}
+
+source:
+  - path: ../
+
+build:
+  number: 0
+  script:
+    - cargo install --locked --path . --root ${{ PREFIX }} --no-track
+
+requirements:
+  build:
+    - ${{ compiler('rust') }}
+
+tests:
+  - package_contents:
+      bin:
+        - msvcup
+        - msvcup-autoenv
+  - script:
+      - msvcup --help
+
+about:
+  homepage: https://github.com/wolfv/msvcup
+  repository: https://github.com/wolfv/msvcup
+  license: BSD-3-Clause
+  license_file: LICENSE
+  summary: A standalone tool for installing the MSVC toolchain and Windows SDK without Visual Studio
+  description: |
+    msvcup downloads and installs the MSVC compiler toolchain and Windows SDK
+    without requiring Visual Studio. It features cross-platform MSI extraction,
+    parallel downloads, and reproducible builds via lock files.
