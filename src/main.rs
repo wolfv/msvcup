@@ -48,6 +48,9 @@ enum Commands {
         /// Cache directory
         #[arg(long)]
         cache_dir: Option<String>,
+        /// Installation directory (overrides MSVCUP_INSTALL_DIR env var and platform default)
+        #[arg(long)]
+        install_dir: Option<String>,
     },
     /// Resolve packages and place shim executables that install on first use
     Resolve {
@@ -102,17 +105,22 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let client = reqwest::Client::builder().build()?;
-    let msvcup_dir = manifest::MsvcupDir::new()?;
+    let default_msvcup_dir = manifest::MsvcupDir::new()?;
 
     match cli.command {
-        Commands::List => list_command(&client, &msvcup_dir).await,
-        Commands::ListPayloads => list_payloads_command(&client, &msvcup_dir).await,
+        Commands::List => list_command(&client, &default_msvcup_dir).await,
+        Commands::ListPayloads => list_payloads_command(&client, &default_msvcup_dir).await,
         Commands::Install {
             packages: pkg_strings,
             lock_file,
             manifest_update,
             cache_dir,
+            install_dir,
         } => {
+            let msvcup_dir = match install_dir {
+                Some(dir) => manifest::MsvcupDir::with_path(dir.into()),
+                None => default_msvcup_dir,
+            };
             let pkgs = parse_msvcup_packages(&pkg_strings)?;
             install::install_command(
                 &client,
@@ -129,8 +137,14 @@ async fn main() -> Result<()> {
             out_dir,
             manifest_update,
         } => {
-            resolve_cmd::resolve_command(&client, &msvcup_dir, &config, &out_dir, manifest_update)
-                .await
+            resolve_cmd::resolve_command(
+                &client,
+                &default_msvcup_dir,
+                &config,
+                &out_dir,
+                manifest_update,
+            )
+            .await
         }
         Commands::Fetch { url, cache_dir } => {
             fetch_cmd::fetch_command(&client, &url, cache_dir.as_deref()).await

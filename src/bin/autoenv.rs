@@ -88,29 +88,46 @@ fn windows_main() -> i32 {
     }
 }
 
+// --- Directory resolution ---
+
+/// Resolve install_dir with priority: config > MSVCUP_INSTALL_DIR env var > platform default.
+#[cfg(windows)]
+fn resolve_install_dir(config: &MsvcupConfig) -> String {
+    if let Some(ref dir) = config.msvcup.install_dir {
+        return dir.clone();
+    }
+    if let Ok(dir) = std::env::var("MSVCUP_INSTALL_DIR") {
+        return dir;
+    }
+    if let Ok(userprofile) = std::env::var("USERPROFILE") {
+        format!("{}\\.msvcup", userprofile)
+    } else {
+        "C:\\msvcup".to_string()
+    }
+}
+
+/// Resolve cache_dir with priority: config > MSVCUP_CACHE_DIR env var > {install_dir}\cache.
+#[cfg(windows)]
+fn resolve_cache_dir(config: &MsvcupConfig, install_dir: &str) -> String {
+    if let Some(ref dir) = config.msvcup.cache_dir {
+        return dir.clone();
+    }
+    if let Ok(dir) = std::env::var("MSVCUP_CACHE_DIR") {
+        return dir;
+    }
+    format!("{}\\cache", install_dir)
+}
+
 // --- Install command ---
 
 #[cfg(windows)]
 fn install_command(self_dir: &std::path::Path) -> Result<(), String> {
-    use std::env;
     use std::process::Command;
 
     let config = read_config(self_dir)?;
 
-    let default_install_dir;
-    let default_cache_dir;
-    if let Ok(userprofile) = env::var("USERPROFILE") {
-        default_install_dir = format!("{}\\.msvcup", userprofile);
-        default_cache_dir = format!("{}\\.msvcup\\cache", userprofile);
-    } else {
-        default_install_dir = "C:\\msvcup".to_string();
-        default_cache_dir = "C:\\msvcup\\cache".to_string();
-    }
-    let cache_dir = config
-        .msvcup
-        .cache_dir
-        .as_deref()
-        .unwrap_or(&default_cache_dir);
+    let install_dir = resolve_install_dir(&config);
+    let cache_dir = resolve_cache_dir(&config, &install_dir);
 
     let lock_file_path = self_dir.join(&config.msvcup.lock_file);
     let lock_file_str = lock_file_path.to_string_lossy();
@@ -136,7 +153,9 @@ fn install_command(self_dir: &std::path::Path) -> Result<(), String> {
         .arg("--manifest-update")
         .arg("off")
         .arg("--cache-dir")
-        .arg(cache_dir);
+        .arg(&cache_dir)
+        .arg("--install-dir")
+        .arg(&install_dir);
     for pkg in &pkg_strings {
         cmd.arg(pkg);
     }
@@ -153,11 +172,6 @@ fn install_command(self_dir: &std::path::Path) -> Result<(), String> {
     }
 
     // Verify env JSON files exist
-    let install_dir = config
-        .msvcup
-        .install_dir
-        .as_deref()
-        .unwrap_or(&default_install_dir);
     let target_arch = &config.msvcup.target_arch;
 
     for pkg_str in &pkg_strings {
@@ -185,22 +199,11 @@ fn shim_forward(
     self_basename: &str,
     args: &[String],
 ) -> Result<i32, String> {
-    use std::env;
     use std::process::Command;
 
     let config = read_config(self_dir)?;
 
-    let default_install_dir;
-    if let Ok(userprofile) = env::var("USERPROFILE") {
-        default_install_dir = format!("{}\\.msvcup", userprofile);
-    } else {
-        default_install_dir = "C:\\msvcup".to_string();
-    }
-    let install_dir = config
-        .msvcup
-        .install_dir
-        .as_deref()
-        .unwrap_or(&default_install_dir);
+    let install_dir = resolve_install_dir(&config);
     let target_arch = &config.msvcup.target_arch;
 
     // Collect package strings

@@ -13,7 +13,7 @@ use crate::sha::Sha256;
 use crate::util::{basename_from_url, insert_sorted};
 use crate::zip_extract::{self, ZipKind};
 use anyhow::{Context, Result, bail};
-use indicatif::MultiProgress;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs;
@@ -128,7 +128,7 @@ async fn install_from_lock_file(
 ) -> Result<()> {
     let lock_file = parse_lock_file(lock_file_path, lock_file_content)?;
 
-    // --- Pass 1: Build cab info map and collect non-cab fetch tasks ---
+    // --- Pass 1: Build cab info map and collect fetch tasks ---
     let mut fetch_tasks: Vec<FetchTask> = Vec::new();
     let mut cab_info: HashMap<String, (String, Sha256)> = HashMap::new();
 
@@ -185,88 +185,115 @@ async fn install_from_lock_file(
         });
     }
 
-    // --- Pass 2: Parallel fetch non-cab payloads ---
+    // --- Pass 2: Parallel fetch ---
     let mp = MultiProgress::new();
+    let total_fetch = fetch_tasks.len() as u64;
+    let overall_pb = mp.add(ProgressBar::new(total_fetch));
+    overall_pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{prefix} [{bar:30.cyan/blue}] {pos}/{len} {msg}")
+            .expect("valid template")
+            .progress_chars("=> "),
+    );
+    overall_pb.set_prefix("Downloading");
+    overall_pb.set_message("");
+
     let semaphore = std::sync::Arc::new(Semaphore::new(MAX_CONCURRENT_DOWNLOADS));
+    let overall_pb_shared = overall_pb.clone();
 
     let mut handles = Vec::new();
     for task in fetch_tasks {
         let client = client.clone();
         let sem = semaphore.clone();
         let mp = mp.clone();
+        let overall_pb = overall_pb_shared.clone();
 
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
-            fetch_payload_async(
+            let result = fetch_payload_async(
                 &client,
                 &task.sha256,
                 &task.url_decoded,
                 &task.cache_path,
                 &mp,
             )
-            .await
+            .await;
+            overall_pb.inc(1);
+            result
         }));
     }
 
     for handle in handles {
         handle.await.unwrap()?;
     }
+    overall_pb.finish_and_clear();
 
     // --- Pass 3: Parallel install (everything is cached from Pass 2) ---
-    let extraction_sem = std::sync::Arc::new(Semaphore::new(max_concurrent_extractions()));
-    let cab_info = std::sync::Arc::new(cab_info);
-    let mut extraction_handles = Vec::new();
-
+    let mut install_entries = Vec::new();
     for lock_pkg in &lock_file.packages {
         let msvcup_pkg = MsvcupPackage::from_string(&lock_pkg.name).unwrap();
-
         for entry in &lock_pkg.payloads {
             let sha256 = Sha256::parse_hex(&entry.sha256).unwrap();
-
-            // Skip payloads for non-native architectures
             if let Some(arch) = crate::lockfile_parse::host_arch_limit(msvcup_pkg.kind, &entry.url)
                 && Arch::native() != Some(arch)
             {
-                let name = basename_from_url(&entry.url);
-                log::info!(
-                    "skipping payload '{}' arch {} != host arch {:?}",
-                    name,
-                    arch,
-                    Arch::native()
-                );
                 continue;
             }
-
-            let install_path = msvcup_dir.path(&[&msvcup_pkg.pool_string()]);
-            let cache_dir = cache_dir.to_string();
-            let url = entry.url.clone();
-            let strip_root_dir = crate::lockfile_parse::strip_root_dir(msvcup_pkg.kind);
-            let cab_info = cab_info.clone();
-            let sem = extraction_sem.clone();
-
-            extraction_handles.push(tokio::spawn(async move {
-                let _permit = sem.acquire().await.unwrap();
-                tokio::task::spawn_blocking(move || {
-                    install_payload(
-                        &install_path,
-                        &cache_dir,
-                        &url,
-                        &sha256,
-                        strip_root_dir,
-                        &cab_info,
-                    )
-                })
-                .await
-                .unwrap()
-            }));
+            install_entries.push((msvcup_pkg.clone(), entry.url.clone(), sha256));
         }
+    }
+
+    let total_extract = install_entries.len() as u64;
+    let extract_pb = mp.add(ProgressBar::new(total_extract));
+    extract_pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{prefix} [{bar:30.green/white}] {pos}/{len} {msg}")
+            .expect("valid template")
+            .progress_chars("=> "),
+    );
+    extract_pb.set_prefix("Extracting ");
+    extract_pb.set_message("");
+
+    let extraction_sem = std::sync::Arc::new(Semaphore::new(max_concurrent_extractions()));
+    let cab_info = std::sync::Arc::new(cab_info);
+    let extract_pb_shared = extract_pb.clone();
+    let mut extraction_handles = Vec::new();
+
+    for (msvcup_pkg, url, sha256) in install_entries {
+        let install_path = msvcup_dir.path(&[&msvcup_pkg.pool_string()]);
+        let cache_dir = cache_dir.to_string();
+        let strip_root_dir = crate::lockfile_parse::strip_root_dir(msvcup_pkg.kind);
+        let cab_info = cab_info.clone();
+        let sem = extraction_sem.clone();
+        let extract_pb = extract_pb_shared.clone();
+
+        let payload_name = crate::util::basename_from_url(&url).to_string();
+        extraction_handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await.unwrap();
+            let result = tokio::task::spawn_blocking(move || {
+                install_payload(
+                    &install_path,
+                    &cache_dir,
+                    &url,
+                    &sha256,
+                    strip_root_dir,
+                    &cab_info,
+                )
+            })
+            .await
+            .unwrap()
+            .with_context(|| format!("installing payload '{}'", payload_name));
+            extract_pb.inc(1);
+            result
+        }));
     }
 
     for handle in extraction_handles {
         handle.await.unwrap()?;
     }
+    extract_pb.finish_and_clear();
 
-    // Finish packages (generate vcvars bat files)
+    // Finish packages (generate vcvars bat files and env JSON)
     for msvcup_pkg in msvcup_pkgs {
         finish_package(msvcup_dir, msvcup_pkg)?;
     }
@@ -332,7 +359,7 @@ fn install_payload(
     let installed_manifest_path = install_dir_path.join("install").join(&installed_basename);
 
     if installed_manifest_path.exists() {
-        log::info!(
+        log::debug!(
             "ALREADY INSTALLED | {} {}",
             basename_from_url(url_decoded),
             sha256
@@ -424,8 +451,16 @@ fn end_install(installed_manifest_path: &Path, current_install_path: &Path) -> R
     let tmp_path = PathBuf::from(format!("{}.tmp", installed_manifest_path.display()));
 
     {
-        let content = fs::read_to_string(current_install_path)?;
-        let mut out = BufWriter::new(fs::File::create(&tmp_path)?);
+        let content = fs::read_to_string(current_install_path).with_context(|| {
+            format!(
+                "reading current install manifest '{}'",
+                current_install_path.display()
+            )
+        })?;
+        let mut out = BufWriter::new(
+            fs::File::create(&tmp_path)
+                .with_context(|| format!("creating tmp manifest '{}'", tmp_path.display()))?,
+        );
         let mut lines = content.lines();
         let _cache_basename = lines.next(); // skip first line
         for line in lines {
@@ -441,11 +476,22 @@ fn end_install(installed_manifest_path: &Path, current_install_path: &Path) -> R
         out.flush()?;
     }
 
-    fs::remove_file(current_install_path)?;
+    fs::remove_file(current_install_path).with_context(|| {
+        format!(
+            "removing current install manifest '{}'",
+            current_install_path.display()
+        )
+    })?;
     if let Some(dir) = installed_manifest_path.parent() {
         fs::create_dir_all(dir)?;
     }
-    fs::rename(&tmp_path, installed_manifest_path)?;
+    fs::rename(&tmp_path, installed_manifest_path).with_context(|| {
+        format!(
+            "renaming '{}' to '{}'",
+            tmp_path.display(),
+            installed_manifest_path.display()
+        )
+    })?;
 
     Ok(())
 }
@@ -458,11 +504,20 @@ fn install_msi(
     manifest_file: &mut fs::File,
 ) -> Result<()> {
     let msi_name = msi_path.file_name().unwrap_or_default().to_string_lossy();
-    log::info!("installing MSI '{}'", msi_name);
+    log::debug!(
+        "installing MSI '{}' from '{}'",
+        msi_name,
+        msi_path.display()
+    );
+
+    if !msi_path.exists() {
+        bail!("MSI file not found at '{}'", msi_path.display());
+    }
 
     // Read the MSI's Media table to find which external cabs it needs
-    let cab_names = crate::msi_extract::read_msi_cab_names(msi_path)?;
-    log::info!(
+    let cab_names = crate::msi_extract::read_msi_cab_names(msi_path)
+        .with_context(|| format!("reading cab names from MSI '{}'", msi_path.display()))?;
+    log::debug!(
         "  Media table has {} cab entries: {:?}",
         cab_names.len(),
         cab_names
@@ -476,7 +531,7 @@ fn install_msi(
     let mut staged_count = 0u32;
     for cab_name in &cab_names {
         if cab_name.starts_with('#') {
-            log::info!(
+            log::debug!(
                 "  cab '{}': embedded (will be extracted from MSI stream)",
                 cab_name
             );
@@ -506,13 +561,14 @@ fn install_msi(
             );
         }
     }
-    log::info!(
+    log::debug!(
         "  staged {} external cab(s) for '{}'",
         staged_count,
         msi_name
     );
 
-    crate::msi_extract::extract_msi(msi_path, install_dir_path, &staging_dir, manifest_file)?;
+    crate::msi_extract::extract_msi(msi_path, install_dir_path, &staging_dir, manifest_file)
+        .with_context(|| format!("extracting MSI '{}'", msi_name))?;
 
     let _ = fs::remove_dir_all(&staging_dir);
     Ok(())

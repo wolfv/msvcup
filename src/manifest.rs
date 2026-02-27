@@ -9,21 +9,46 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// The msvcup data directory
+/// The msvcup data directory.
+///
+/// Resolution order for the root path:
+/// 1. Explicit path passed via [`MsvcupDir::with_path`] (from `--install-dir` CLI arg)
+/// 2. `MSVCUP_INSTALL_DIR` environment variable
+/// 3. Platform default: `%USERPROFILE%\.msvcup` on Windows, `{data_dir}/msvcup` elsewhere
 pub struct MsvcupDir {
     pub root_path: PathBuf,
 }
 
 impl MsvcupDir {
+    /// Create from the default location, checking `MSVCUP_INSTALL_DIR` env var first.
     pub fn new() -> Result<Self> {
-        let root_path = if cfg!(windows) {
-            PathBuf::from("C:\\msvcup")
-        } else {
-            dirs::data_dir()
-                .ok_or_else(|| anyhow::anyhow!("unable to determine app data directory"))?
-                .join("msvcup")
-        };
+        if let Ok(dir) = std::env::var("MSVCUP_INSTALL_DIR") {
+            return Ok(Self {
+                root_path: PathBuf::from(dir),
+            });
+        }
+        let root_path = Self::platform_default()?;
         Ok(Self { root_path })
+    }
+
+    /// Create with an explicit root path (e.g. from `--install-dir`).
+    pub fn with_path(root_path: PathBuf) -> Self {
+        Self { root_path }
+    }
+
+    /// Platform default: `%USERPROFILE%\.msvcup` on Windows, `{data_dir}/msvcup` elsewhere.
+    fn platform_default() -> Result<PathBuf> {
+        if cfg!(windows) {
+            if let Ok(userprofile) = std::env::var("USERPROFILE") {
+                Ok(PathBuf::from(format!("{}\\.msvcup", userprofile)))
+            } else {
+                Ok(PathBuf::from("C:\\msvcup"))
+            }
+        } else {
+            Ok(dirs::data_dir()
+                .ok_or_else(|| anyhow::anyhow!("unable to determine app data directory"))?
+                .join("msvcup"))
+        }
     }
 
     pub fn path(&self, parts: &[&str]) -> PathBuf {
@@ -68,7 +93,7 @@ pub async fn fetch(
         let pb = ProgressBar::new(size);
         pb.set_style(
             ProgressStyle::default_bar()
-                .template("{msg}\n  [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec})")
+                .template("  {msg:<40!} [{bar:20.cyan/blue}] {bytes:>10}/{total_bytes:<10} {bytes_per_sec:>12}")
                 .expect("valid template")
                 .progress_chars("=> "),
         );
@@ -78,7 +103,7 @@ pub async fn fetch(
         let pb = ProgressBar::new_spinner();
         pb.set_style(
             ProgressStyle::default_spinner()
-                .template("{msg} {bytes} ({bytes_per_sec})")
+                .template("  {msg:<40!} {bytes:>10} {bytes_per_sec:>12}")
                 .expect("valid template"),
         );
         pb.set_message(file_name.to_string());
