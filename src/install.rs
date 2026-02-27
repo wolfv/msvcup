@@ -38,6 +38,7 @@ pub async fn install_command(
     lock_file_path: &str,
     manifest_update: ManifestUpdate,
     cache_dir: Option<&str>,
+    mp: &MultiProgress,
 ) -> Result<()> {
     if msvcup_pkgs.is_empty() {
         bail!("no packages were given to install, use 'list' to list the available packages");
@@ -67,6 +68,7 @@ pub async fn install_command(
                     cache_dir_str,
                     lock_file_path,
                     &content,
+                    mp,
                 )
                 .await?;
                 return Ok(());
@@ -107,6 +109,7 @@ pub async fn install_command(
         cache_dir_str,
         lock_file_path,
         &lock_file_content,
+        mp,
     )
     .await
 }
@@ -125,6 +128,7 @@ async fn install_from_lock_file(
     cache_dir: &str,
     lock_file_path: &str,
     lock_file_content: &str,
+    mp: &MultiProgress,
 ) -> Result<()> {
     let lock_file = parse_lock_file(lock_file_path, lock_file_content)?;
 
@@ -186,7 +190,6 @@ async fn install_from_lock_file(
     }
 
     // --- Pass 2: Parallel fetch ---
-    let mp = MultiProgress::new();
     let total_fetch = fetch_tasks.len() as u64;
     let overall_pb = mp.add(ProgressBar::new(total_fetch));
     overall_pb.set_style(
@@ -358,7 +361,8 @@ fn install_payload(
         "{}.files",
         cache_path.file_name().unwrap().to_str().unwrap()
     );
-    let installed_manifest_path = install_dir_path.join("install").join(&installed_basename);
+    let install_meta_dir = install_dir_path.join("install");
+    let installed_manifest_path = install_meta_dir.join(&installed_basename);
 
     if installed_manifest_path.exists() {
         log::debug!(
@@ -369,18 +373,18 @@ fn install_payload(
         return Ok(());
     }
 
-    // Create install lock
-    let install_lock_path = install_dir_path.join(".lock");
     fs::create_dir_all(install_dir_path)?;
-    let _install_lock = LockFile::lock(install_lock_path.to_str().unwrap())?;
+    fs::create_dir_all(&install_meta_dir)?;
 
-    let current_install_path = install_dir_path.join("install").join("current");
+    // Use a per-payload temp manifest file to avoid races with the shared "current" file.
+    // Each payload writes to its own unique temp file based on the hash.
+    let pending_path = install_meta_dir.join(format!("{}.pending", installed_basename));
 
-    // Handle previous interrupted install
-    start_install(install_dir_path, &current_install_path)?;
+    // Clean up any leftover pending file from a previous interrupted install
+    clean_up_pending(&pending_path)?;
 
     // Write install manifest
-    let mut manifest_file = fs::File::create(&current_install_path)?;
+    let mut manifest_file = fs::File::create(&pending_path)?;
     writeln!(
         manifest_file,
         "{}",
@@ -419,46 +423,45 @@ fn install_payload(
     }
 
     drop(manifest_file);
-    end_install(&installed_manifest_path, &current_install_path)?;
+    finalize_manifest(&installed_manifest_path, &pending_path)?;
 
     Ok(())
 }
 
-fn start_install(_install_dir_path: &Path, current_install_path: &Path) -> Result<()> {
-    if let Ok(content) = fs::read_to_string(current_install_path) {
-        log::debug!("found previous install manifest, cleaning up...");
+/// Clean up a pending manifest from a previous interrupted install.
+/// Removes any files that were newly created by the interrupted payload.
+fn clean_up_pending(pending_path: &Path) -> Result<()> {
+    if let Ok(content) = fs::read_to_string(pending_path) {
+        log::debug!("found interrupted install manifest '{}', cleaning up...", pending_path.display());
         let mut lines = content.lines();
-        if let Some(_cache_basename) = lines.next() {
-            for line in lines {
-                if line.is_empty() {
-                    continue;
-                }
-                if let Some(sub_path) = line.strip_prefix("new ") {
-                    log::debug!("removing file '{}'", sub_path);
-                    let _ = fs::remove_file(sub_path);
-                }
-                // "add " lines: don't remove, file was added by another payload
+        let _cache_basename = lines.next(); // skip first line (cache basename)
+        for line in lines {
+            if line.is_empty() {
+                continue;
             }
+            if let Some(sub_path) = line.strip_prefix("new ") {
+                log::debug!("removing file '{}'", sub_path);
+                let _ = fs::remove_file(sub_path);
+            }
+            // "add " lines: don't remove, file was added by another payload
         }
-        let _ = fs::remove_file(current_install_path);
-    }
-
-    if let Some(dir) = current_install_path.parent() {
-        fs::create_dir_all(dir)?;
+        let _ = fs::remove_file(pending_path);
     }
     Ok(())
 }
 
-fn end_install(installed_manifest_path: &Path, current_install_path: &Path) -> Result<()> {
-    let tmp_path = PathBuf::from(format!("{}.tmp", installed_manifest_path.display()));
+/// Finalize installation by converting the pending manifest into the installed manifest.
+/// Strips the cache basename header and the "new "/"add " prefixes, writing just the file paths.
+fn finalize_manifest(installed_manifest_path: &Path, pending_path: &Path) -> Result<()> {
+    let content = fs::read_to_string(pending_path).with_context(|| {
+        format!(
+            "reading pending install manifest '{}'",
+            pending_path.display()
+        )
+    })?;
 
+    let tmp_path = PathBuf::from(format!("{}.tmp", installed_manifest_path.display()));
     {
-        let content = fs::read_to_string(current_install_path).with_context(|| {
-            format!(
-                "reading current install manifest '{}'",
-                current_install_path.display()
-            )
-        })?;
         let mut out = BufWriter::new(
             fs::File::create(&tmp_path)
                 .with_context(|| format!("creating tmp manifest '{}'", tmp_path.display()))?,
@@ -478,15 +481,12 @@ fn end_install(installed_manifest_path: &Path, current_install_path: &Path) -> R
         out.flush()?;
     }
 
-    fs::remove_file(current_install_path).with_context(|| {
+    fs::remove_file(pending_path).with_context(|| {
         format!(
-            "removing current install manifest '{}'",
-            current_install_path.display()
+            "removing pending manifest '{}'",
+            pending_path.display()
         )
     })?;
-    if let Some(dir) = installed_manifest_path.parent() {
-        fs::create_dir_all(dir)?;
-    }
     fs::rename(&tmp_path, installed_manifest_path).with_context(|| {
         format!(
             "renaming '{}' to '{}'",

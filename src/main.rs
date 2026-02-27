@@ -17,10 +17,26 @@ mod zip_extract;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
+use indicatif::MultiProgress;
 use packages::{
     ManifestUpdate, MsvcupPackage, MsvcupPackageKind, PackageId, PayloadId, get_packages,
     identify_package, identify_payload,
 };
+
+/// Writer that routes output through MultiProgress::suspend() so log lines
+/// don't clobber progress bars.
+#[derive(Clone)]
+struct IndicatifWriter(MultiProgress);
+
+impl std::io::Write for IndicatifWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.suspend(|| std::io::stderr().write(buf))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.suspend(|| std::io::stderr().flush())
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "msvcup", version, about = "MSVC package installer")]
@@ -101,7 +117,13 @@ fn parse_msvcup_packages(pkg_strings: &[String]) -> Result<Vec<MsvcupPackage>> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let mp = MultiProgress::new();
+
+    // Route log output through MultiProgress so logs don't clobber progress bars
+    let mp_writer = IndicatifWriter(mp.clone());
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .target(env_logger::Target::Pipe(Box::new(mp_writer)))
+        .init();
 
     let cli = Cli::parse();
     let client = reqwest::Client::builder().build()?;
@@ -129,6 +151,7 @@ async fn main() -> Result<()> {
                 &lock_file,
                 manifest_update,
                 cache_dir.as_deref(),
+                &mp,
             )
             .await
         }
