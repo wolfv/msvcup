@@ -144,6 +144,7 @@ async fn main() -> Result<()> {
                 None => default_msvcup_dir,
             };
             let pkgs = parse_msvcup_packages(&pkg_strings)?;
+            let target_arch = arch::Arch::native().unwrap_or(arch::Arch::X64);
             install::install_command(
                 &client,
                 &msvcup_dir,
@@ -151,6 +152,7 @@ async fn main() -> Result<()> {
                 &lock_file,
                 manifest_update,
                 cache_dir.as_deref(),
+                target_arch,
                 &mp,
             )
             .await
@@ -212,7 +214,7 @@ async fn list_command(client: &reqwest::Client, msvcup_dir: &manifest::MsvcupDir
         }
 
         for payload in pkgs.payloads_from_pkg_index(pkg_index) {
-            if identify_payload(&payload.file_name) == PayloadId::Sdk {
+            if identify_payload(&payload.file_name, arch::Arch::X64) == PayloadId::Sdk {
                 let msvcup_pkg = MsvcupPackage::new(MsvcupPackageKind::Sdk, pkg.version.clone());
                 util::insert_sorted(&mut msvcup_pkgs, msvcup_pkg, MsvcupPackage::order);
             }

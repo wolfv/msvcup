@@ -288,15 +288,24 @@ pub enum PayloadId {
     Sdk,
 }
 
-pub fn identify_payload(payload_filename: &str) -> PayloadId {
+pub fn identify_payload(payload_filename: &str, target_arch: Arch) -> PayloadId {
     if payload_filename.starts_with("Installers\\Universal CRT Headers Libraries and Sources-") {
         return PayloadId::Sdk;
     }
-    if payload_filename.starts_with("Installers\\Windows SDK Desktop Headers ") {
-        return PayloadId::Sdk;
+    // Arch-specific SDK payloads: "Windows SDK Desktop Headers <arch>-" / "... Libs <arch>-"
+    if let Some(rest) = payload_filename.strip_prefix("Installers\\Windows SDK Desktop Headers ") {
+        return if sdk_payload_arch_matches(rest, target_arch) {
+            PayloadId::Sdk
+        } else {
+            PayloadId::Unknown
+        };
     }
-    if payload_filename.starts_with("Installers\\Windows SDK Desktop Libs ") {
-        return PayloadId::Sdk;
+    if let Some(rest) = payload_filename.strip_prefix("Installers\\Windows SDK Desktop Libs ") {
+        return if sdk_payload_arch_matches(rest, target_arch) {
+            PayloadId::Sdk
+        } else {
+            PayloadId::Unknown
+        };
     }
     if payload_filename.starts_with("Installers\\Windows SDK Signing Tools-") {
         return PayloadId::Sdk;
@@ -311,6 +320,20 @@ pub fn identify_payload(payload_filename: &str) -> PayloadId {
         return PayloadId::Sdk;
     }
     PayloadId::Unknown
+}
+
+/// Check if an SDK payload's arch (parsed from the filename after the prefix) matches target_arch.
+/// Filenames look like "arm64-x86_en-us.msi" or "x64-x86_en-us.msi".
+fn sdk_payload_arch_matches(rest: &str, target_arch: Arch) -> bool {
+    if let Some(dash_pos) = rest.find('-') {
+        let arch_str = &rest[..dash_pos];
+        match Arch::from_str_ignore_case(arch_str) {
+            Some(arch) => arch == target_arch,
+            None => true, // unknown arch pattern, include to be safe
+        }
+    } else {
+        true // no dash found, include to be safe
+    }
 }
 
 // --- Lock file URL kind ---
@@ -522,8 +545,9 @@ pub fn get_packages(vsman_path: &str, vsman_content: &str) -> Result<Packages> {
     })
 }
 
-/// Identify which packages should be installed based on the install request
-pub fn get_install_pkg(id: &str) -> Option<InstallPkgKind> {
+/// Identify which packages should be installed based on the install request.
+/// Filters MSVC packages by host and target architecture.
+pub fn get_install_pkg(id: &str, host_arch: Arch, target_arch: Arch) -> Option<InstallPkgKind> {
     match identify_package(id) {
         PackageId::Unknown => None,
         PackageId::Unexpected { .. } => None,
@@ -545,20 +569,28 @@ pub fn get_install_pkg(id: &str) -> Option<InstallPkgKind> {
             let after_crt = &something[1 + crt.len()..]; // skip ".CRT"
             if let Some(after_dot) = after_crt.strip_prefix(".") {
                 if after_dot == "Headers.base" {
+                    // Arch-neutral, always include
                     return Some(InstallPkgKind::Msvc(build_version.to_string()));
                 }
-                // Check for Redist patterns
+                // Check for Redist patterns: CRT.Redist.<arch>.base
                 let (next_part, next_end) = scan_id_part(after_dot, 0);
                 if next_part == "Redist" {
                     let rest2 = &after_dot[next_end..];
                     let (arch_part, arch_end) = scan_id_part(rest2, 0);
-                    if Arch::from_str_ignore_case(arch_part).is_some() {
+                    if let Some(arch) = Arch::from_str_ignore_case(arch_part) {
+                        if arch != target_arch {
+                            return None;
+                        }
                         let final_rest = &rest2[arch_end..];
                         if final_rest == "base" {
                             return Some(InstallPkgKind::Msvc(build_version.to_string()));
                         }
                     }
-                } else if Arch::from_str_ignore_case(next_part).is_some() {
+                } else if let Some(arch) = Arch::from_str_ignore_case(next_part) {
+                    // CRT.<arch>.Desktop.base, CRT.<arch>.Store.base, etc.
+                    if arch != target_arch {
+                        return None;
+                    }
                     let final_rest = &after_dot[next_end..];
                     if final_rest == "Desktop.base"
                         || final_rest == "Desktop.debug.base"
@@ -573,9 +605,13 @@ pub fn get_install_pkg(id: &str) -> Option<InstallPkgKind> {
         PackageId::MsvcVersionToolsSomething { .. } => None,
         PackageId::MsvcVersionHostTarget {
             build_version,
+            host_arch: pkg_host,
+            target_arch: pkg_target,
             name,
-            ..
         } => {
+            if pkg_host != host_arch || pkg_target != target_arch {
+                return None;
+            }
             if name == "base" || name == "Res.base" {
                 Some(InstallPkgKind::Msvc(build_version.to_string()))
             } else {

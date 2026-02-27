@@ -57,7 +57,7 @@ pub async fn resolve_command(
         .await?;
 
         let pkgs = get_packages(vsman_path.to_str().unwrap(), &vsman_content)?;
-        install::update_lock_file(&msvcup_pkgs, lock_file_str, &pkgs)?;
+        install::update_lock_file(&msvcup_pkgs, lock_file_str, &pkgs, target_arch)?;
         log::info!("lock file updated: '{}'", lock_file_str);
     }
 

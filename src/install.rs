@@ -38,6 +38,7 @@ pub async fn install_command(
     lock_file_path: &str,
     manifest_update: ManifestUpdate,
     cache_dir: Option<&str>,
+    target_arch: Arch,
     mp: &MultiProgress,
 ) -> Result<()> {
     if msvcup_pkgs.is_empty() {
@@ -89,7 +90,7 @@ pub async fn install_command(
 
     let pkgs = get_packages(vsman_path.to_str().unwrap(), &vsman_content)?;
 
-    update_lock_file(msvcup_pkgs, lock_file_path, &pkgs)?;
+    update_lock_file(msvcup_pkgs, lock_file_path, &pkgs, target_arch)?;
 
     let lock_file_content = fs::read_to_string(lock_file_path)
         .with_context(|| format!("reading lock file '{}' after update", lock_file_path))?;
@@ -114,13 +115,6 @@ pub async fn install_command(
     .await
 }
 
-/// Information needed to fetch a single payload
-struct FetchTask {
-    url_decoded: String,
-    sha256: Sha256,
-    cache_path: PathBuf,
-}
-
 async fn install_from_lock_file(
     client: &reqwest::Client,
     msvcup_pkgs: &[MsvcupPackage],
@@ -132,21 +126,25 @@ async fn install_from_lock_file(
 ) -> Result<()> {
     let lock_file = parse_lock_file(lock_file_path, lock_file_content)?;
 
-    // --- Pass 1: Build cab info map and collect fetch tasks ---
-    let mut fetch_tasks: Vec<FetchTask> = Vec::new();
-    let mut cab_info: HashMap<String, (String, Sha256)> = HashMap::new();
+    // --- Build cab info lookup from lock file ---
+    let cab_info: HashMap<String, (String, Sha256)> = {
+        let mut m = HashMap::new();
+        for (cab_filename, cab_entry) in &lock_file.cabs {
+            let sha256 = Sha256::parse_hex(&cab_entry.sha256).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "invalid sha256 for cab '{}': '{}'",
+                    cab_filename,
+                    cab_entry.sha256
+                )
+            })?;
+            m.insert(cab_filename.clone(), (cab_entry.url.clone(), sha256));
+        }
+        m
+    };
+    let cab_info = std::sync::Arc::new(cab_info);
 
-    for (cab_filename, cab_entry) in &lock_file.cabs {
-        let sha256 = Sha256::parse_hex(&cab_entry.sha256).ok_or_else(|| {
-            anyhow::anyhow!(
-                "invalid sha256 for cab '{}': '{}'",
-                cab_filename,
-                cab_entry.sha256
-            )
-        })?;
-        cab_info.insert(cab_filename.clone(), (cab_entry.url.clone(), sha256));
-    }
-
+    // --- Collect install entries (payloads to download and extract) ---
+    let mut install_entries: Vec<(MsvcupPackage, String, Sha256)> = Vec::new();
     for lock_pkg in &lock_file.packages {
         let msvcup_pkg = MsvcupPackage::from_string(&lock_pkg.name)
             .map_err(|e| anyhow::anyhow!("invalid package name '{}': {}", lock_pkg.name, e))?;
@@ -167,136 +165,123 @@ async fn install_from_lock_file(
                 continue;
             }
 
-            let name = basename_from_url(&entry.url);
-            let cache_path = cache_entry_path(cache_dir, &sha256, name);
-
-            fetch_tasks.push(FetchTask {
-                url_decoded: entry.url.clone(),
-                sha256,
-                cache_path,
-            });
+            install_entries.push((msvcup_pkg.clone(), entry.url.clone(), sha256));
         }
     }
 
-    // Also pre-fetch all CAB files so they're cached before Pass 3
-    for (url, sha256) in cab_info.values() {
-        let name = basename_from_url(url);
-        let cache_path = cache_entry_path(cache_dir, sha256, name);
-        fetch_tasks.push(FetchTask {
-            url_decoded: url.clone(),
-            sha256: *sha256,
-            cache_path,
-        });
-    }
+    // --- Pipelined install: download → (read MSI → fetch CABs) → extract ---
+    // Each payload is processed as a single async task. VSIX/ZIP payloads are
+    // downloaded and immediately extracted. MSI payloads are downloaded, their
+    // Media table is read to discover needed CABs, those CABs are fetched,
+    // and then the MSI is extracted.
 
-    // --- Pass 2: Parallel fetch ---
-    let total_fetch = fetch_tasks.len() as u64;
-    let overall_pb = mp.add(ProgressBar::new(total_fetch));
-    overall_pb.set_style(
+    let total = install_entries.len() as u64;
+    let pb = mp.add(ProgressBar::new(total));
+    pb.set_style(
         ProgressStyle::default_bar()
             .template("{prefix} [{bar:30.cyan/blue}] {pos}/{len} {msg}")
             .expect("valid template")
             .progress_chars("=> "),
     );
-    overall_pb.set_prefix("Downloading");
-    overall_pb.set_message("");
+    pb.set_prefix("Installing");
+    pb.set_message("");
 
-    let semaphore = std::sync::Arc::new(Semaphore::new(MAX_CONCURRENT_DOWNLOADS));
-    let overall_pb_shared = overall_pb.clone();
-
+    let download_sem = std::sync::Arc::new(Semaphore::new(MAX_CONCURRENT_DOWNLOADS));
+    let extract_sem = std::sync::Arc::new(Semaphore::new(max_concurrent_extractions()));
     let mut handles = Vec::new();
-    for task in fetch_tasks {
+
+    for (msvcup_pkg, url, sha256) in install_entries {
         let client = client.clone();
-        let sem = semaphore.clone();
         let mp = mp.clone();
-        let overall_pb = overall_pb_shared.clone();
+        let pb = pb.clone();
+        let download_sem = download_sem.clone();
+        let extract_sem = extract_sem.clone();
+        let cab_info = cab_info.clone();
+        let install_path = msvcup_dir.path(&[&msvcup_pkg.pool_string()]);
+        let cache_dir = cache_dir.to_string();
+        let strip_root_dir = crate::lockfile_parse::strip_root_dir(msvcup_pkg.kind);
+        let payload_name = basename_from_url(&url).to_string();
 
         handles.push(tokio::spawn(async move {
-            let _permit = sem.acquire().await.unwrap();
-            let result = fetch_payload_async(
-                &client,
-                &task.sha256,
-                &task.url_decoded,
-                &task.cache_path,
-                &mp,
-            )
-            .await;
-            overall_pb.inc(1);
-            result
+            let name = basename_from_url(&url);
+            let cache_path = cache_entry_path(&cache_dir, &sha256, name);
+
+            // Step 1: Download the payload
+            {
+                let _permit = download_sem.acquire().await.unwrap();
+                fetch_payload_async(&client, &sha256, &url, &cache_path, &mp).await?;
+            }
+
+            // Step 2: For MSIs, discover needed CABs and fetch them
+            if get_lock_file_url_kind(&url) == Some(LockFileUrlKind::Msi) {
+                let msi_cache_path = cache_path.clone();
+                let cab_names = tokio::task::spawn_blocking(move || {
+                    crate::msi_extract::read_msi_cab_names(&msi_cache_path)
+                })
+                .await
+                .unwrap()
+                .with_context(|| format!("reading cab names from '{}'", payload_name))?;
+
+                let mut cab_handles = Vec::new();
+                for cab_name in cab_names {
+                    if cab_name.starts_with('#') {
+                        continue;
+                    }
+                    if let Some((cab_url, cab_sha256)) = cab_info.get(&cab_name) {
+                        let client = client.clone();
+                        let mp = mp.clone();
+                        let download_sem = download_sem.clone();
+                        let cab_url = cab_url.clone();
+                        let cab_sha256 = *cab_sha256;
+                        let cache_dir = cache_dir.clone();
+                        cab_handles.push(tokio::spawn(async move {
+                            let _permit = download_sem.acquire().await.unwrap();
+                            let cab_cache_name = basename_from_url(&cab_url);
+                            let cab_cache_path =
+                                cache_entry_path(&cache_dir, &cab_sha256, cab_cache_name);
+                            fetch_payload_async(
+                                &client,
+                                &cab_sha256,
+                                &cab_url,
+                                &cab_cache_path,
+                                &mp,
+                            )
+                            .await
+                        }));
+                    }
+                }
+                for h in cab_handles {
+                    h.await.unwrap()?;
+                }
+            }
+
+            // Step 3: Extract
+            {
+                let _permit = extract_sem.acquire().await.unwrap();
+                tokio::task::spawn_blocking(move || {
+                    install_payload(
+                        &install_path,
+                        &cache_dir,
+                        &url,
+                        &sha256,
+                        strip_root_dir,
+                        &cab_info,
+                    )
+                })
+                .await
+                .unwrap()
+                .with_context(|| format!("installing payload '{}'", payload_name))?;
+            }
+
+            pb.inc(1);
+            Ok::<(), anyhow::Error>(())
         }));
     }
 
     for handle in handles {
         handle.await.unwrap()?;
     }
-    overall_pb.finish_and_clear();
-
-    // --- Pass 3: Parallel install (everything is cached from Pass 2) ---
-    let mut install_entries = Vec::new();
-    for lock_pkg in &lock_file.packages {
-        let msvcup_pkg = MsvcupPackage::from_string(&lock_pkg.name).unwrap();
-        for entry in &lock_pkg.payloads {
-            let sha256 = Sha256::parse_hex(&entry.sha256).unwrap();
-            if let Some(arch) = crate::lockfile_parse::host_arch_limit(msvcup_pkg.kind, &entry.url)
-                && Arch::native() != Some(arch)
-            {
-                continue;
-            }
-            install_entries.push((msvcup_pkg.clone(), entry.url.clone(), sha256));
-        }
-    }
-
-    let total_extract = install_entries.len() as u64;
-    let extract_pb = mp.add(ProgressBar::new(total_extract));
-    extract_pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{prefix} [{bar:30.green/white}] {pos}/{len} {msg}")
-            .expect("valid template")
-            .progress_chars("=> "),
-    );
-    extract_pb.set_prefix("Extracting ");
-    extract_pb.set_message("");
-
-    let extraction_sem = std::sync::Arc::new(Semaphore::new(max_concurrent_extractions()));
-    let cab_info = std::sync::Arc::new(cab_info);
-    let extract_pb_shared = extract_pb.clone();
-    let mut extraction_handles = Vec::new();
-
-    for (msvcup_pkg, url, sha256) in install_entries {
-        let install_path = msvcup_dir.path(&[&msvcup_pkg.pool_string()]);
-        let cache_dir = cache_dir.to_string();
-        let strip_root_dir = crate::lockfile_parse::strip_root_dir(msvcup_pkg.kind);
-        let cab_info = cab_info.clone();
-        let sem = extraction_sem.clone();
-        let extract_pb = extract_pb_shared.clone();
-
-        let payload_name = crate::util::basename_from_url(&url).to_string();
-        let payload_name_msg = payload_name.clone();
-        extraction_handles.push(tokio::spawn(async move {
-            let _permit = sem.acquire().await.unwrap();
-            extract_pb.set_message(payload_name_msg);
-            let result = tokio::task::spawn_blocking(move || {
-                install_payload(
-                    &install_path,
-                    &cache_dir,
-                    &url,
-                    &sha256,
-                    strip_root_dir,
-                    &cab_info,
-                )
-            })
-            .await
-            .unwrap()
-            .with_context(|| format!("installing payload '{}'", payload_name));
-            extract_pb.inc(1);
-            result
-        }));
-    }
-
-    for handle in extraction_handles {
-        handle.await.unwrap()?;
-    }
-    extract_pb.finish_and_clear();
+    pb.finish_and_clear();
 
     // Finish packages (generate vcvars bat files and env JSON)
     for msvcup_pkg in msvcup_pkgs {
@@ -526,7 +511,13 @@ fn install_msi(
     );
 
     // Stage only the needed CAB files (already pre-fetched in Pass 2)
-    let staging_dir = install_dir_path.join(".msi-staging");
+    // Use a unique staging dir per MSI to avoid races when multiple MSIs
+    // for the same package are extracted in parallel.
+    let msi_stem = msi_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy();
+    let staging_dir = install_dir_path.join(format!(".msi-staging-{}", msi_stem));
     let _ = fs::remove_dir_all(&staging_dir);
     fs::create_dir_all(&staging_dir)?;
 
@@ -782,7 +773,9 @@ pub fn update_lock_file(
     msvcup_pkgs: &[MsvcupPackage],
     lock_file_path: &str,
     pkgs: &Packages,
+    target_arch: Arch,
 ) -> Result<()> {
+    let host_arch = Arch::native().unwrap_or(Arch::X64);
     // Collect install payloads
     let mut install_payloads: Vec<(MsvcupPackage, usize)> = Vec::new(); // (target, payload_index)
 
@@ -793,7 +786,7 @@ pub fn update_lock_file(
         }
 
         // Check if this package should be installed
-        if let Some(install_pkg) = get_install_pkg(&pkg.id) {
+        if let Some(install_pkg) = get_install_pkg(&pkg.id, host_arch, target_arch) {
             let (target_kind, target_version) = match &install_pkg {
                 InstallPkgKind::Msvc(v) => (MsvcupPackageKind::Msvc, v.as_str()),
                 InstallPkgKind::Msbuild(v) => (MsvcupPackageKind::Msbuild, v.as_str()),
@@ -822,7 +815,7 @@ pub fn update_lock_file(
         let payload_range = pkgs.payload_range_from_pkg_index(pkg_index);
         for pi in payload_range {
             let payload = &pkgs.payloads[pi];
-            if identify_payload(&payload.file_name) == PayloadId::Sdk {
+            if identify_payload(&payload.file_name, target_arch) == PayloadId::Sdk {
                 for msvcup_pkg in msvcup_pkgs {
                     if msvcup_pkg.kind == MsvcupPackageKind::Sdk
                         && msvcup_pkg.version == pkg.version
