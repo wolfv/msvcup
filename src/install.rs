@@ -13,10 +13,10 @@ use crate::sha::Sha256;
 use crate::util::{basename_from_url, insert_sorted};
 use crate::zip_extract::{self, ZipKind};
 use anyhow::{Context, Result, bail};
+use fs_err as fs;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::fs;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use tokio::sync::Semaphore;
@@ -56,9 +56,9 @@ pub async fn install_command(
 
     if try_no_update {
         if let Ok(content) = fs::read_to_string(lock_file_path) {
-            log::info!("lock file found: '{}'", lock_file_path);
+            log::debug!("lock file found: '{}'", lock_file_path);
             if let Some(mismatch) = check_lock_file_pkgs(lock_file_path, &content, msvcup_pkgs) {
-                log::info!("{}", mismatch);
+                log::debug!("{}", mismatch);
             } else {
                 install_from_lock_file(
                     client,
@@ -72,7 +72,7 @@ pub async fn install_command(
                 return Ok(());
             }
         } else {
-            log::info!("lock file NOT found: '{}'", lock_file_path);
+            log::debug!("lock file NOT found: '{}'", lock_file_path);
         }
     }
 
@@ -268,8 +268,10 @@ async fn install_from_lock_file(
         let extract_pb = extract_pb_shared.clone();
 
         let payload_name = crate::util::basename_from_url(&url).to_string();
+        let payload_name_msg = payload_name.clone();
         extraction_handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
+            extract_pb.set_message(payload_name_msg);
             let result = tokio::task::spawn_blocking(move || {
                 install_payload(
                     &install_path,
@@ -424,7 +426,7 @@ fn install_payload(
 
 fn start_install(_install_dir_path: &Path, current_install_path: &Path) -> Result<()> {
     if let Ok(content) = fs::read_to_string(current_install_path) {
-        log::info!("found previous install manifest, cleaning up...");
+        log::debug!("found previous install manifest, cleaning up...");
         let mut lines = content.lines();
         if let Some(_cache_basename) = lines.next() {
             for line in lines {
@@ -432,7 +434,7 @@ fn start_install(_install_dir_path: &Path, current_install_path: &Path) -> Resul
                     continue;
                 }
                 if let Some(sub_path) = line.strip_prefix("new ") {
-                    log::info!("removing file '{}'", sub_path);
+                    log::debug!("removing file '{}'", sub_path);
                     let _ = fs::remove_file(sub_path);
                 }
                 // "add " lines: don't remove, file was added by another payload
@@ -586,7 +588,7 @@ fn finish_package(msvcup_dir: &MsvcupDir, msvcup_pkg: &MsvcupPackage) -> Result<
 
     let install_path = msvcup_dir.path(&[&msvcup_pkg.pool_string()]);
     let install_version = query_install_version(finish_kind, &install_path)?;
-    log::info!("{} install version '{}'", msvcup_pkg, install_version);
+    log::debug!("{} install version '{}'", msvcup_pkg, install_version);
 
     // Generate vcvars bat files and env JSON files
     fs::create_dir_all(&install_path)?;
@@ -768,10 +770,10 @@ fn update_file(path: &Path, content: &[u8]) -> Result<()> {
         Err(_) => true,
     };
     if needs_update {
-        log::info!("{}: updating...", path.display());
+        log::debug!("{}: updating...", path.display());
         fs::write(path, content)?;
     } else {
-        log::info!("{}: already up-to-date", path.display());
+        log::debug!("{}: already up-to-date", path.display());
     }
     Ok(())
 }
@@ -918,7 +920,7 @@ pub fn update_lock_file(
         packages: json_packages,
     };
 
-    log::info!("{} payloads:", install_payloads.len());
+    log::debug!("{} payloads:", install_payloads.len());
     if let Some(dir) = Path::new(lock_file_path).parent() {
         fs::create_dir_all(dir)?;
     }

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::fs;
+use fs_err as fs;
 use std::io::{self, Write};
 use std::path::Path;
 

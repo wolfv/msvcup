@@ -22,6 +22,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
 env_logger = "0.11"
+fs-err = "3"
 fs2 = "0.4"
 hex = "0.4"
 indicatif = "0.18.4"

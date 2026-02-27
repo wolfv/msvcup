@@ -3,9 +3,9 @@ use crate::lock_file::LockFile;
 use crate::packages::ManifestUpdate;
 use crate::sha::{Sha256, Sha256Streaming};
 use anyhow::{Context, Result, bail};
+use fs_err as fs;
 use futures::StreamExt;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 

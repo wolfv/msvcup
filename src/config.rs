@@ -25,8 +25,7 @@ pub struct MsvcupSettings {
 
 impl MsvcupConfig {
     pub fn from_file(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("reading config file '{}'", path.display()))?;
+        let content = fs_err::read_to_string(path)?;
         let config: MsvcupConfig = toml::from_str(&content)
             .with_context(|| format!("parsing config file '{}'", path.display()))?;
         config.validate()?;

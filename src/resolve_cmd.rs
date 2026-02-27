@@ -4,7 +4,7 @@ use crate::install;
 use crate::manifest::MsvcupDir;
 use crate::packages::{ManifestUpdate, MsvcupPackageKind, get_packages};
 use anyhow::Result;
-use std::fs;
+use fs_err as fs;
 use std::path::{Path, PathBuf};
 
 pub async fn resolve_command(

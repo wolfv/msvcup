@@ -3,7 +3,7 @@ use crate::manifest::{MsvcupDir, fetch};
 use crate::sha::Sha256;
 use crate::util::basename_from_url;
 use anyhow::{Result, bail};
-use std::fs;
+use fs_err as fs;
 use std::path::PathBuf;
 
 pub async fn fetch_command(

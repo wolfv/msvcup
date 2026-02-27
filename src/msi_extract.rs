@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
+use fs_err as fs;
 use std::collections::HashMap;
-use std::fs;
 use std::io::{self, Read, Write};
 use std::path::Path;
 
@@ -33,7 +33,7 @@ pub fn extract_msi(
     // Parse the Media table to find CAB file names
     let media_entries = read_media_table(&mut package)?;
 
-    log::info!(
+    log::debug!(
         "  [{}] tables: {} dirs, {} components, {} files, {} media entries",
         msi_name,
         directory_table.len(),
@@ -53,7 +53,7 @@ pub fn extract_msi(
         let cab_name = &media.cabinet;
         let cab_path = cab_dir.join(cab_name);
         if cab_path.exists() {
-            log::info!("  [{}] extracting external CAB '{}'", msi_name, cab_name);
+            log::debug!("  [{}] extracting external CAB '{}'", msi_name, cab_name);
             let cab_file = fs::File::open(&cab_path)
                 .with_context(|| format!("opening CAB file '{}'", cab_path.display()))?;
             let count = extract_cab(
@@ -65,7 +65,7 @@ pub fn extract_msi(
                 manifest_file,
             )
             .with_context(|| format!("extracting CAB '{}'", cab_path.display()))?;
-            log::info!(
+            log::debug!(
                 "  [{}] extracted {} files from '{}'",
                 msi_name,
                 count,
@@ -84,7 +84,7 @@ pub fn extract_msi(
     }
 
     if found_external {
-        log::info!(
+        log::debug!(
             "  [{}] done: {} files from external CAB(s)",
             msi_name,
             extracted_count
@@ -110,7 +110,7 @@ pub fn extract_msi(
         };
 
         if stream_names.iter().any(|s| s == stream_name) {
-            log::info!(
+            log::debug!(
                 "  [{}] extracting embedded CAB stream '{}'",
                 msi_name,
                 stream_name
@@ -131,7 +131,7 @@ pub fn extract_msi(
                 manifest_file,
             )
             .with_context(|| format!("extracting embedded CAB '{}'", stream_name))?;
-            log::info!(
+            log::debug!(
                 "  [{}] extracted {} files from embedded '{}'",
                 msi_name,
                 count,
@@ -156,7 +156,7 @@ pub fn extract_msi(
                 continue;
             }
 
-            log::info!("  [{}] found CAB signature in stream '{}'", msi_name, name);
+            log::debug!("  [{}] found CAB signature in stream '{}'", msi_name, name);
             let mut cab_data = sig.to_vec();
             reader.read_to_end(&mut cab_data)?;
 
@@ -169,7 +169,7 @@ pub fn extract_msi(
                 &directory_table,
                 manifest_file,
             )?;
-            log::info!(
+            log::debug!(
                 "  [{}] extracted {} files from stream '{}'",
                 msi_name,
                 count,
@@ -181,7 +181,7 @@ pub fn extract_msi(
 
     if extracted_count == 0 {
         if file_table.is_empty() {
-            log::info!(
+            log::debug!(
                 "  [{}] no files in File table, nothing to extract (metadata-only MSI)",
                 msi_name
             );
@@ -193,7 +193,7 @@ pub fn extract_msi(
             );
         }
     } else {
-        log::info!(
+        log::debug!(
             "  [{}] done: extracted {} files total",
             msi_name,
             extracted_count
@@ -215,7 +215,9 @@ struct MediaEntry {
 
 /// Read the File table from the MSI database.
 /// Returns a map from file key to FileEntry.
-fn read_file_table(package: &mut msi::Package<fs::File>) -> Result<HashMap<String, FileEntry>> {
+fn read_file_table(
+    package: &mut msi::Package<std::fs::File>,
+) -> Result<HashMap<String, FileEntry>> {
     let mut map = HashMap::new();
     if !package.has_table("File") {
         return Ok(map);
@@ -247,7 +249,9 @@ fn read_file_table(package: &mut msi::Package<fs::File>) -> Result<HashMap<Strin
 
 /// Read the Component table from the MSI database.
 /// Returns a map from component ID to directory ID.
-fn read_component_table(package: &mut msi::Package<fs::File>) -> Result<HashMap<String, String>> {
+fn read_component_table(
+    package: &mut msi::Package<std::fs::File>,
+) -> Result<HashMap<String, String>> {
     let mut map = HashMap::new();
     if !package.has_table("Component") {
         return Ok(map);
@@ -272,7 +276,7 @@ fn read_component_table(package: &mut msi::Package<fs::File>) -> Result<HashMap<
 /// Read the Directory table from the MSI database.
 /// Returns a map from directory ID to (parent_id, default_dir).
 fn read_directory_table(
-    package: &mut msi::Package<fs::File>,
+    package: &mut msi::Package<std::fs::File>,
 ) -> Result<HashMap<String, (String, String)>> {
     let mut map = HashMap::new();
     if !package.has_table("Directory") {
@@ -302,7 +306,7 @@ fn read_directory_table(
 }
 
 /// Read the Media table from the MSI database.
-fn read_media_table(package: &mut msi::Package<fs::File>) -> Result<Vec<MediaEntry>> {
+fn read_media_table(package: &mut msi::Package<std::fs::File>) -> Result<Vec<MediaEntry>> {
     let mut entries = Vec::new();
     if !package.has_table("Media") {
         return Ok(entries);
