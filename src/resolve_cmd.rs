@@ -3,7 +3,7 @@ use crate::config::MsvcupConfig;
 use crate::install;
 use crate::manifest::MsvcupDir;
 use crate::packages::{ManifestUpdate, MsvcupPackageKind, get_packages};
-use anyhow::{Result, bail};
+use anyhow::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -88,8 +88,14 @@ pub async fn resolve_command(
         fs::write(&out_config_path, toml_str)?;
     }
 
-    // Step 3: Place shim executables
-    let autoenv_exe = find_autoenv_binary()?;
+    // Step 3: Place shim executables and msvcup binaries
+    let (autoenv_exe, msvcup_exe) = find_binaries()?;
+
+    // Place msvcup-autoenv.exe and msvcup.exe so `msvcup-autoenv install` can find msvcup
+    let out_autoenv = Path::new(out_dir).join("msvcup-autoenv.exe");
+    update_file_from_file(&autoenv_exe, &out_autoenv)?;
+    let out_msvcup = Path::new(out_dir).join("msvcup.exe");
+    update_file_from_file(&msvcup_exe, &out_msvcup)?;
 
     let has_msvc = msvcup_pkgs
         .iter()
@@ -116,31 +122,46 @@ pub async fn resolve_command(
 
     log::info!("shims placed in '{}'", out_dir);
     log::info!(
-        "tools will be installed on first use from lock file '{}'",
-        out_lock_name.to_str().unwrap()
+        "run 'msvcup-autoenv install' in '{}' to install packages",
+        out_dir
     );
 
     Ok(())
 }
 
-/// Find the msvcup-autoenv binary next to the current executable.
-fn find_autoenv_binary() -> Result<PathBuf> {
+/// Find the msvcup-autoenv and msvcup binaries next to the current executable.
+fn find_binaries() -> Result<(PathBuf, PathBuf)> {
     let current_exe = std::env::current_exe()?;
     let dir = current_exe
         .parent()
         .ok_or_else(|| anyhow::anyhow!("cannot determine directory of current executable"))?;
 
-    let candidates = ["msvcup-autoenv.exe", "msvcup-autoenv"];
-    for name in &candidates {
+    let autoenv = find_binary_in_dir(dir, &["msvcup-autoenv.exe", "msvcup-autoenv"])
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot find msvcup-autoenv binary in '{}'. Build it with: cargo build --bin msvcup-autoenv",
+                dir.display()
+            )
+        })?;
+
+    let msvcup = find_binary_in_dir(dir, &["msvcup.exe", "msvcup"]).ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot find msvcup binary in '{}'. Build it with: cargo build --bin msvcup",
+            dir.display()
+        )
+    })?;
+
+    Ok((autoenv, msvcup))
+}
+
+fn find_binary_in_dir(dir: &Path, candidates: &[&str]) -> Option<PathBuf> {
+    for name in candidates {
         let path = dir.join(name);
         if path.exists() {
-            return Ok(path);
+            return Some(path);
         }
     }
-    bail!(
-        "cannot find msvcup-autoenv binary in '{}'. Build it with: cargo build --bin msvcup-autoenv",
-        dir.display()
-    );
+    None
 }
 
 fn update_file_from_file(src: &Path, dest: &Path) -> Result<()> {

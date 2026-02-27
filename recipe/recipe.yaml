@@ -20,7 +20,7 @@ source:
   - path: ../
 
 build:
-  number: 3
+  number: 4
 
 outputs:
   # --- msvcup CLI tool ---
@@ -48,7 +48,7 @@ outputs:
       - script:
           - msvcup --help
 
-  # --- vs2022_win-64: compiler activation with lazy install ---
+  # --- vs2022_win-64: compiler activation ---
   - package:
       name: vs${{ vsyear }}_win-64
       version: ${{ cl_version }}
@@ -75,6 +75,8 @@ outputs:
             - ml64
             - rc
             - mt
+            - msvcup
+            - msvcup-autoenv
           files:
             - bin/msvcup.toml
             - bin/msvc.lock
@@ -108,6 +110,8 @@ outputs:
             - lib
             - rc
             - mt
+            - msvcup
+            - msvcup-autoenv
           files:
             - bin/msvcup.toml
             - bin/msvc.lock
@@ -152,4 +156,5 @@ about:
   description: |
     msvcup downloads and installs the MSVC compiler toolchain and Windows SDK
     without requiring Visual Studio. The vs2022_* packages provide conda-forge
-    compatible compiler activation that lazily installs MSVC on first use.
+    compatible compiler activation. Run 'msvcup-autoenv install' to install
+    the toolchain before first use.

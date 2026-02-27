@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256 as Sha256Hasher};
 use std::fmt;
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Sha256 {
     pub bytes: [u8; 32],
 }

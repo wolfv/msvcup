@@ -17,10 +17,7 @@ pub fn extract_msi(
     cab_dir: &Path,
     manifest_file: &mut fs::File,
 ) -> Result<()> {
-    let msi_name = msi_path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy();
+    let msi_name = msi_path.file_name().unwrap_or_default().to_string_lossy();
     let mut package = msi::open(msi_path)
         .with_context(|| format!("opening MSI file '{}'", msi_path.display()))?;
 
@@ -68,7 +65,12 @@ pub fn extract_msi(
                 manifest_file,
             )
             .with_context(|| format!("extracting CAB '{}'", cab_path.display()))?;
-            log::info!("  [{}] extracted {} files from '{}'", msi_name, count, cab_name);
+            log::info!(
+                "  [{}] extracted {} files from '{}'",
+                msi_name,
+                count,
+                cab_name
+            );
             extracted_count += count;
             found_external = true;
         } else {
@@ -154,11 +156,7 @@ pub fn extract_msi(
                 continue;
             }
 
-            log::info!(
-                "  [{}] found CAB signature in stream '{}'",
-                msi_name,
-                name
-            );
+            log::info!("  [{}] found CAB signature in stream '{}'", msi_name, name);
             let mut cab_data = sig.to_vec();
             reader.read_to_end(&mut cab_data)?;
 
@@ -195,7 +193,11 @@ pub fn extract_msi(
             );
         }
     } else {
-        log::info!("  [{}] done: extracted {} files total", msi_name, extracted_count);
+        log::info!(
+            "  [{}] done: extracted {} files total",
+            msi_name,
+            extracted_count
+        );
     }
     Ok(())
 }

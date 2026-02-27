@@ -49,17 +49,6 @@ enum Commands {
         #[arg(long)]
         cache_dir: Option<String>,
     },
-    /// Create autoenv directory with executable wrappers
-    Autoenv {
-        /// Target CPU architecture
-        #[arg(long)]
-        target_cpu: String,
-        /// Output directory
-        #[arg(long)]
-        out_dir: String,
-        /// Packages
-        packages: Vec<String>,
-    },
     /// Resolve packages and place shim executables that install on first use
     Resolve {
         /// Path to msvcup.toml config file
@@ -134,16 +123,6 @@ async fn main() -> Result<()> {
                 cache_dir.as_deref(),
             )
             .await
-        }
-        Commands::Autoenv {
-            target_cpu,
-            out_dir,
-            packages: pkg_strings,
-        } => {
-            let target_cpu = arch::Arch::from_str_exact(&target_cpu)
-                .ok_or_else(|| anyhow::anyhow!("invalid --target-cpu '{}'", target_cpu))?;
-            let pkgs = parse_msvcup_packages(&pkg_strings)?;
-            autoenv_cmd::autoenv_command(&pkgs, target_cpu, &out_dir)
         }
         Commands::Resolve {
             config,

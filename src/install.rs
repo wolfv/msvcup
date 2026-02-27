@@ -24,6 +24,13 @@ use tokio::sync::Semaphore;
 /// Max concurrent downloads
 const MAX_CONCURRENT_DOWNLOADS: usize = 8;
 
+/// Max concurrent extractions (CPU/IO-bound), based on available CPU cores.
+fn max_concurrent_extractions() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+}
+
 pub async fn install_command(
     client: &reqwest::Client,
     msvcup_dir: &MsvcupDir,
@@ -167,6 +174,17 @@ async fn install_from_lock_file(
         }
     }
 
+    // Also pre-fetch all CAB files so they're cached before Pass 3
+    for (url, sha256) in cab_info.values() {
+        let name = basename_from_url(url);
+        let cache_path = cache_entry_path(cache_dir, sha256, name);
+        fetch_tasks.push(FetchTask {
+            url_decoded: url.clone(),
+            sha256: *sha256,
+            cache_path,
+        });
+    }
+
     // --- Pass 2: Parallel fetch non-cab payloads ---
     let mp = MultiProgress::new();
     let semaphore = std::sync::Arc::new(Semaphore::new(MAX_CONCURRENT_DOWNLOADS));
@@ -194,7 +212,11 @@ async fn install_from_lock_file(
         handle.await.unwrap()?;
     }
 
-    // --- Pass 3: Sequential install (everything except cabs is cached) ---
+    // --- Pass 3: Parallel install (everything is cached from Pass 2) ---
+    let extraction_sem = std::sync::Arc::new(Semaphore::new(max_concurrent_extractions()));
+    let cab_info = std::sync::Arc::new(cab_info);
+    let mut extraction_handles = Vec::new();
+
     for lock_pkg in &lock_file.packages {
         let msvcup_pkg = MsvcupPackage::from_string(&lock_pkg.name).unwrap();
 
@@ -216,18 +238,32 @@ async fn install_from_lock_file(
             }
 
             let install_path = msvcup_dir.path(&[&msvcup_pkg.pool_string()]);
-            install_payload(
-                client,
-                &install_path,
-                cache_dir,
-                &entry.url,
-                &sha256,
-                crate::lockfile_parse::strip_root_dir(msvcup_pkg.kind),
-                &cab_info,
-                &mp,
-            )
-            .await?;
+            let cache_dir = cache_dir.to_string();
+            let url = entry.url.clone();
+            let strip_root_dir = crate::lockfile_parse::strip_root_dir(msvcup_pkg.kind);
+            let cab_info = cab_info.clone();
+            let sem = extraction_sem.clone();
+
+            extraction_handles.push(tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                tokio::task::spawn_blocking(move || {
+                    install_payload(
+                        &install_path,
+                        &cache_dir,
+                        &url,
+                        &sha256,
+                        strip_root_dir,
+                        &cab_info,
+                    )
+                })
+                .await
+                .unwrap()
+            }));
         }
+    }
+
+    for handle in extraction_handles {
+        handle.await.unwrap()?;
     }
 
     // Finish packages (generate vcvars bat files)
@@ -272,16 +308,13 @@ fn cache_entry_path(cache_dir: &str, sha256: &Sha256, name: &str) -> PathBuf {
     PathBuf::from(cache_dir).join(basename)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn install_payload(
-    client: &reqwest::Client,
+fn install_payload(
     install_dir_path: &Path,
     cache_dir: &str,
     url_decoded: &str,
     sha256: &Sha256,
     strip_root_dir: bool,
     cab_info: &HashMap<String, (String, Sha256)>,
-    mp: &MultiProgress,
 ) -> Result<()> {
     let url_kind = get_lock_file_url_kind(url_decoded).ok_or_else(|| {
         anyhow::anyhow!(
@@ -346,15 +379,12 @@ async fn install_payload(
         }
         LockFileUrlKind::Msi => {
             install_msi(
-                client,
                 &cache_path,
                 install_dir_path,
                 cache_dir,
                 cab_info,
-                mp,
                 &mut manifest_file,
-            )
-            .await?;
+            )?;
         }
         LockFileUrlKind::Cab => unreachable!(),
     }
@@ -420,13 +450,11 @@ fn end_install(installed_manifest_path: &Path, current_install_path: &Path) -> R
     Ok(())
 }
 
-async fn install_msi(
-    client: &reqwest::Client,
+fn install_msi(
     msi_path: &Path,
     install_dir_path: &Path,
     cache_dir: &str,
     cab_info: &HashMap<String, (String, Sha256)>,
-    mp: &MultiProgress,
     manifest_file: &mut fs::File,
 ) -> Result<()> {
     let msi_name = msi_path.file_name().unwrap_or_default().to_string_lossy();
@@ -440,7 +468,7 @@ async fn install_msi(
         cab_names
     );
 
-    // Stage only the needed CAB files
+    // Stage only the needed CAB files (already pre-fetched in Pass 2)
     let staging_dir = install_dir_path.join(".msi-staging");
     let _ = fs::remove_dir_all(&staging_dir);
     fs::create_dir_all(&staging_dir)?;
@@ -457,7 +485,13 @@ async fn install_msi(
         if let Some((url, sha256)) = cab_info.get(cab_name.as_str()) {
             let name = basename_from_url(url);
             let cab_cache_path = cache_entry_path(cache_dir, sha256, name);
-            fetch_payload_async(client, sha256, url, &cab_cache_path, mp).await?;
+            if !cab_cache_path.exists() {
+                bail!(
+                    "CAB '{}' not found in cache at '{}' (should have been pre-fetched)",
+                    cab_name,
+                    cab_cache_path.display()
+                );
+            }
             let dest = staging_dir.join(cab_name);
             if fs::hard_link(&cab_cache_path, &dest).is_err() {
                 fs::copy(&cab_cache_path, &dest)?;
@@ -498,13 +532,18 @@ fn finish_package(msvcup_dir: &MsvcupDir, msvcup_pkg: &MsvcupPackage) -> Result<
     let install_version = query_install_version(finish_kind, &install_path)?;
     log::info!("{} install version '{}'", msvcup_pkg, install_version);
 
-    // Generate vcvars bat files
+    // Generate vcvars bat files and env JSON files
     fs::create_dir_all(&install_path)?;
     for arch in Arch::ALL {
         let bat = generate_vcvars_bat(finish_kind, &install_version, arch);
         let basename = format!("vcvars-{}.bat", arch);
         let bat_path = install_path.join(&basename);
         update_file(&bat_path, bat.as_bytes())?;
+
+        let env_json = generate_env_json(finish_kind, &install_version, arch, &install_path);
+        let json_basename = format!("env-{}.json", arch);
+        let json_path = install_path.join(&json_basename);
+        update_file(&json_path, env_json.as_bytes())?;
     }
 
     Ok(())
@@ -576,6 +615,95 @@ fn generate_vcvars_bat(
             target = target_arch,
         ),
     }
+}
+
+/// Generate a JSON file with resolved environment variable entries for a given arch.
+/// The JSON maps env var names to arrays of absolute path entries to prepend.
+fn generate_env_json(
+    finish_kind: FinishKind,
+    install_version: &str,
+    target_arch: Arch,
+    install_path: &Path,
+) -> String {
+    let native_arch = Arch::native().unwrap_or(Arch::X64);
+    let root = install_path.to_string_lossy();
+
+    let mut env: HashMap<String, Vec<String>> = HashMap::new();
+
+    match finish_kind {
+        FinishKind::Msvc => {
+            env.insert(
+                "INCLUDE".to_string(),
+                vec![format!(
+                    "{}\\VC\\Tools\\MSVC\\{}\\include",
+                    root, install_version
+                )],
+            );
+            env.insert(
+                "PATH".to_string(),
+                vec![format!(
+                    "{}\\VC\\Tools\\MSVC\\{}\\bin\\Host{}\\{}",
+                    root, install_version, native_arch, target_arch
+                )],
+            );
+            env.insert(
+                "LIB".to_string(),
+                vec![format!(
+                    "{}\\VC\\Tools\\MSVC\\{}\\lib\\{}",
+                    root, install_version, target_arch
+                )],
+            );
+        }
+        FinishKind::Sdk => {
+            env.insert(
+                "INCLUDE".to_string(),
+                vec![
+                    format!(
+                        "{}\\Windows Kits\\10\\Include\\{}\\ucrt",
+                        root, install_version
+                    ),
+                    format!(
+                        "{}\\Windows Kits\\10\\Include\\{}\\shared",
+                        root, install_version
+                    ),
+                    format!(
+                        "{}\\Windows Kits\\10\\Include\\{}\\um",
+                        root, install_version
+                    ),
+                    format!(
+                        "{}\\Windows Kits\\10\\Include\\{}\\winrt",
+                        root, install_version
+                    ),
+                    format!(
+                        "{}\\Windows Kits\\10\\Include\\{}\\cppwinrt",
+                        root, install_version
+                    ),
+                ],
+            );
+            env.insert(
+                "PATH".to_string(),
+                vec![format!(
+                    "{}\\Windows Kits\\10\\bin\\{}\\{}",
+                    root, install_version, native_arch
+                )],
+            );
+            env.insert(
+                "LIB".to_string(),
+                vec![
+                    format!(
+                        "{}\\Windows Kits\\10\\Lib\\{}\\ucrt\\{}",
+                        root, install_version, target_arch
+                    ),
+                    format!(
+                        "{}\\Windows Kits\\10\\Lib\\{}\\um\\{}",
+                        root, install_version, target_arch
+                    ),
+                ],
+            );
+        }
+    }
+
+    serde_json::to_string_pretty(&env).unwrap()
 }
 
 fn update_file(path: &Path, content: &[u8]) -> Result<()> {

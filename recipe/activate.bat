@@ -1,4 +1,8 @@
 @echo off
+rem Ensure MSVC toolchain is installed
+pushd "%CONDA_PREFIX%\bin"
+msvcup-autoenv.exe install
+popd
 set "CC=cl.exe"
 set "CXX=cl.exe"
 set "DISTUTILS_USE_SDK=1"

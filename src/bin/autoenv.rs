@@ -2,18 +2,16 @@
 //!
 //! This executable is meant to be copied/renamed as `cl.exe`, `link.exe`, etc.
 //!
-//! **Config mode** (msvcup.toml next to the binary):
-//! 1. Reads `msvcup.toml` to find package versions, install dir, cache dir
-//! 2. Checks if packages are already installed
-//! 3. If not, runs `msvcup install` to install them on first use
-//! 4. Loads vcvars from the installed packages
+//! **Shim mode** (default, when invoked as a tool name):
+//! 1. Reads `msvcup.toml` next to the binary for package info and install dir
+//! 2. Loads `env-{arch}.json` from each installed package directory
+//! 3. If env JSON is missing, errors with "run msvcup-autoenv install first"
+//! 4. Prepends env vars (PATH, INCLUDE, LIB) from the JSON
 //! 5. Finds the real tool in PATH and forwards execution
 //!
-//! **Legacy mode** (env file next to the binary):
-//! 1. Reads the `env` file in the same directory (list of vcvars .bat paths)
-//! 2. Parses each vcvars .bat file to set environment variables
-//! 3. Finds the real tool in the (now-modified) PATH
-//! 4. Spawns it as a child process, forwarding all arguments and the exit code
+//! **Install mode** (`msvcup-autoenv install`):
+//! 1. Reads `msvcup.toml` to find packages and lock file
+//! 2. Runs `msvcup install` to download and extract packages
 //!
 //! On non-Windows platforms this binary just prints an error and exits.
 
@@ -32,11 +30,10 @@ fn main() {
 #[cfg(windows)]
 fn windows_main() -> i32 {
     use std::env;
-    use std::fs;
-    use std::path::Path;
-    use std::process::Command;
 
-    // 1. Determine our own exe name (e.g. "cl.exe")
+    let args: Vec<String> = env::args().collect();
+
+    // Determine our own exe path
     let self_exe = match env::current_exe() {
         Ok(p) => p,
         Err(e) => {
@@ -59,76 +56,46 @@ fn windows_main() -> i32 {
         }
     };
 
-    // 2. Decide mode: config-based (msvcup.toml) or legacy (env file)
-    let config_path = self_dir.join("msvcup.toml");
-    if config_path.exists() {
-        match config_mode(self_dir, &self_basename) {
-            Ok(exit_code) => return exit_code,
-            Err(e) => {
-                eprintln!("msvcup-autoenv: {e}");
-                return 1;
-            }
-        }
-    }
-
-    // Legacy mode: read `env` file
-    let env_path = self_dir.join("env");
-    let env_content = match fs::read_to_string(&env_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!(
-                "msvcup-autoenv: neither 'msvcup.toml' nor 'env' found in '{}': {e}",
-                self_dir.display()
-            );
-            return 1;
-        }
+    // Check for install subcommand:
+    // Either invoked as `msvcup-autoenv install` or as `msvcup-autoenv.exe install`
+    let is_autoenv_name = {
+        let lower = self_basename.to_ascii_lowercase();
+        lower == "msvcup-autoenv.exe" || lower == "msvcup-autoenv"
     };
 
-    for line in env_content.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
+    if is_autoenv_name {
+        if args.len() >= 2 && args[1] == "install" {
+            return match install_command(self_dir) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("msvcup-autoenv install: {e}");
+                    1
+                }
+            };
         }
-        if let Err(e) = load_vcvars(line) {
-            eprintln!("msvcup-autoenv: error loading '{line}': {e}");
-            return 1;
-        }
+        eprintln!("usage: msvcup-autoenv install");
+        eprintln!("  Installs MSVC packages according to msvcup.toml and the lock file.");
+        return 1;
     }
 
-    let real_exe = match find_in_path(&self_basename, self_dir) {
-        Some(p) => p,
-        None => {
-            eprintln!("msvcup-autoenv: unable to find '{self_basename}' in PATH");
-            return 1;
-        }
-    };
-
-    let args: Vec<String> = env::args().skip(1).collect();
-    match Command::new(&real_exe).args(&args).status() {
-        Ok(status) => status.code().unwrap_or(1),
+    // Shim mode: forward to the real tool
+    match shim_forward(self_dir, &self_basename, &args[1..]) {
+        Ok(exit_code) => exit_code,
         Err(e) => {
-            eprintln!(
-                "msvcup-autoenv: failed to execute '{}': {e}",
-                real_exe.display()
-            );
+            eprintln!("msvcup-autoenv: {e}");
             1
         }
     }
 }
 
-/// Config-based mode: read msvcup.toml, ensure packages are installed, then forward.
+// --- Install command ---
+
 #[cfg(windows)]
-fn config_mode(self_dir: &std::path::Path, self_basename: &str) -> Result<i32, String> {
+fn install_command(self_dir: &std::path::Path) -> Result<(), String> {
     use std::env;
-    use std::fs;
-    use std::path::Path;
     use std::process::Command;
 
-    let config_path = self_dir.join("msvcup.toml");
-    let config_content = fs::read_to_string(&config_path)
-        .map_err(|e| format!("cannot read '{}': {e}", config_path.display()))?;
-    let config: MsvcupConfig = toml::from_str(&config_content)
-        .map_err(|e| format!("cannot parse '{}': {e}", config_path.display()))?;
+    let config = read_config(self_dir)?;
 
     let default_install_dir;
     let default_cache_dir;
@@ -139,23 +106,15 @@ fn config_mode(self_dir: &std::path::Path, self_basename: &str) -> Result<i32, S
         default_install_dir = "C:\\msvcup".to_string();
         default_cache_dir = "C:\\msvcup\\cache".to_string();
     }
-    let install_dir = config
-        .msvcup
-        .install_dir
-        .as_deref()
-        .unwrap_or(&default_install_dir);
     let cache_dir = config
         .msvcup
         .cache_dir
         .as_deref()
         .unwrap_or(&default_cache_dir);
-    let target_arch = config.msvcup.target_arch.as_str();
 
-    // Resolve the lock file path relative to the config
     let lock_file_path = self_dir.join(&config.msvcup.lock_file);
     let lock_file_str = lock_file_path.to_string_lossy();
 
-    // Collect package strings for the install command
     let mut pkg_strings: Vec<String> = Vec::new();
     for (name, version) in &config.packages {
         pkg_strings.push(format!("{}-{}", name, version));
@@ -165,81 +124,178 @@ fn config_mode(self_dir: &std::path::Path, self_basename: &str) -> Result<i32, S
         return Err("no packages specified in msvcup.toml".to_string());
     }
 
-    // Check if packages are already installed by looking for vcvars files
-    let mut needs_install = false;
-    for pkg_str in &pkg_strings {
-        let vcvars_path = format!("{}\\{}\\vcvars-{}.bat", install_dir, pkg_str, target_arch);
-        if !Path::new(&vcvars_path).exists() {
-            needs_install = true;
-            break;
-        }
+    // Find msvcup binary next to us or in PATH
+    let msvcup_exe = find_msvcup_binary(self_dir).ok_or("cannot find 'msvcup' binary")?;
+
+    eprintln!("msvcup-autoenv: installing packages...");
+
+    let mut cmd = Command::new(&msvcup_exe);
+    cmd.arg("install")
+        .arg("--lock-file")
+        .arg(lock_file_str.as_ref())
+        .arg("--manifest-update")
+        .arg("off")
+        .arg("--cache-dir")
+        .arg(cache_dir);
+    for pkg in &pkg_strings {
+        cmd.arg(pkg);
     }
 
-    // Install if needed
-    if needs_install {
-        eprintln!("msvcup-autoenv: installing packages (first use)...");
+    let status = cmd
+        .status()
+        .map_err(|e| format!("failed to run '{}': {e}", msvcup_exe.display()))?;
 
-        // Find msvcup binary next to us or in PATH
-        let msvcup_exe = find_msvcup_binary(self_dir).ok_or("cannot find 'msvcup' binary")?;
+    if !status.success() {
+        return Err(format!(
+            "msvcup install failed with exit code {:?}",
+            status.code()
+        ));
+    }
 
-        let mut cmd = Command::new(&msvcup_exe);
-        cmd.arg("install")
-            .arg("--lock-file")
-            .arg(lock_file_str.as_ref())
-            .arg("--manifest-update")
-            .arg("off")
-            .arg("--cache-dir")
-            .arg(cache_dir);
-        for pkg in &pkg_strings {
-            cmd.arg(pkg);
+    // Verify env JSON files exist
+    let install_dir = config
+        .msvcup
+        .install_dir
+        .as_deref()
+        .unwrap_or(&default_install_dir);
+    let target_arch = &config.msvcup.target_arch;
+
+    for pkg_str in &pkg_strings {
+        if pkg_str.starts_with("ninja-") || pkg_str.starts_with("cmake-") {
+            continue;
         }
-
-        let status = cmd
-            .status()
-            .map_err(|e| format!("failed to run '{}': {e}", msvcup_exe.display()))?;
-
-        if !status.success() {
+        let json_path = format!("{}\\{}\\env-{}.json", install_dir, pkg_str, target_arch);
+        if !std::path::Path::new(&json_path).exists() {
             return Err(format!(
-                "msvcup install failed with exit code {:?}",
-                status.code()
+                "installation succeeded but '{}' was not generated",
+                json_path
             ));
         }
     }
 
-    // Load vcvars for each package
+    eprintln!("msvcup-autoenv: installation complete");
+    Ok(())
+}
+
+// --- Shim forwarding ---
+
+#[cfg(windows)]
+fn shim_forward(
+    self_dir: &std::path::Path,
+    self_basename: &str,
+    args: &[String],
+) -> Result<i32, String> {
+    use std::env;
+    use std::process::Command;
+
+    let config = read_config(self_dir)?;
+
+    let default_install_dir;
+    if let Ok(userprofile) = env::var("USERPROFILE") {
+        default_install_dir = format!("{}\\.msvcup", userprofile);
+    } else {
+        default_install_dir = "C:\\msvcup".to_string();
+    }
+    let install_dir = config
+        .msvcup
+        .install_dir
+        .as_deref()
+        .unwrap_or(&default_install_dir);
+    let target_arch = &config.msvcup.target_arch;
+
+    // Collect package strings
+    let mut pkg_strings: Vec<String> = Vec::new();
+    for (name, version) in &config.packages {
+        pkg_strings.push(format!("{}-{}", name, version));
+    }
+
+    // Load env JSON for each package and apply env vars
     for pkg_str in &pkg_strings {
-        // Skip packages that don't have vcvars (ninja, cmake)
         if pkg_str.starts_with("ninja-") || pkg_str.starts_with("cmake-") {
             continue;
         }
-        let vcvars_path = format!("{}\\{}\\vcvars-{}.bat", install_dir, pkg_str, target_arch);
-        if Path::new(&vcvars_path).exists() {
-            load_vcvars(&vcvars_path).map_err(|e| format!("error loading '{vcvars_path}': {e}"))?;
-        }
+        let json_path = format!("{}\\{}\\env-{}.json", install_dir, pkg_str, target_arch);
+        load_env_json(&json_path)?;
     }
 
     // Find and execute the real tool
-    let real_exe = find_in_path(self_basename, self_dir)
-        .ok_or_else(|| format!("unable to find '{self_basename}' in PATH after setup"))?;
+    let real_exe = find_in_path(self_basename, self_dir).ok_or_else(|| {
+        format!(
+            "unable to find '{}' in PATH after setting up environment",
+            self_basename
+        )
+    })?;
 
-    let args: Vec<String> = env::args().skip(1).collect();
-    match Command::new(&real_exe).args(&args).status() {
+    match Command::new(&real_exe).args(args).status() {
         Ok(status) => Ok(status.code().unwrap_or(1)),
         Err(e) => Err(format!("failed to execute '{}': {e}", real_exe.display())),
     }
 }
 
+// --- Helpers ---
+
+#[cfg(windows)]
+fn read_config(self_dir: &std::path::Path) -> Result<MsvcupConfig, String> {
+    let config_path = self_dir.join("msvcup.toml");
+    if !config_path.exists() {
+        return Err(format!(
+            "'msvcup.toml' not found in '{}'. Use 'msvcup resolve' to set up the shim directory.",
+            self_dir.display()
+        ));
+    }
+    let config_content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("cannot read '{}': {e}", config_path.display()))?;
+    toml::from_str(&config_content)
+        .map_err(|e| format!("cannot parse '{}': {e}", config_path.display()))
+}
+
+/// Load env-{arch}.json and prepend entries to environment variables.
+#[cfg(windows)]
+fn load_env_json(json_path: &str) -> Result<(), String> {
+    use std::collections::HashMap;
+    use std::env;
+
+    let content = match std::fs::read_to_string(json_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!(
+                "packages not installed (missing '{}'). Run 'msvcup-autoenv install' first.",
+                json_path
+            ));
+        }
+        Err(e) => return Err(format!("cannot read '{}': {e}", json_path)),
+    };
+
+    let env_map: HashMap<String, Vec<String>> =
+        serde_json::from_str(&content).map_err(|e| format!("cannot parse '{}': {e}", json_path))?;
+
+    for (name, new_paths) in &env_map {
+        if new_paths.is_empty() {
+            continue;
+        }
+        let current = env::var(name).unwrap_or_default();
+        let new_value = if current.is_empty() {
+            new_paths.join(";")
+        } else {
+            format!("{};{}", new_paths.join(";"), current)
+        };
+        // SAFETY: this binary is single-threaded
+        unsafe {
+            env::set_var(name, &new_value);
+        }
+    }
+    Ok(())
+}
+
 /// Find the msvcup binary: first next to ourselves, then in PATH.
 #[cfg(windows)]
 fn find_msvcup_binary(self_dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    // Check next to our binary
     for name in &["msvcup.exe", "msvcup"] {
         let candidate = self_dir.join(name);
         if candidate.exists() {
             return Some(candidate);
         }
     }
-    // Check in PATH
     let path_var = std::env::var("PATH").ok()?;
     for dir in path_var.split(';') {
         if dir.is_empty() {
@@ -253,8 +309,41 @@ fn find_msvcup_binary(self_dir: &std::path::Path) -> Option<std::path::PathBuf> 
     None
 }
 
-// --- Minimal TOML config parsing for the autoenv binary ---
-// We use serde + toml to avoid reimplementing a parser.
+/// Search PATH for an executable, skipping the directory `skip_dir` (our own dir).
+#[cfg(windows)]
+fn find_in_path(exe_name: &str, skip_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    use std::env;
+    use std::path::PathBuf;
+
+    let path_var = env::var("PATH").ok()?;
+    for dir in path_var.split(';') {
+        if dir.is_empty() {
+            continue;
+        }
+        let dir_path = PathBuf::from(dir);
+        if same_dir(&dir_path, skip_dir) {
+            continue;
+        }
+        let candidate = dir_path.join(exe_name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Check if two directory paths refer to the same directory.
+#[cfg(windows)]
+fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&b.to_string_lossy()),
+    }
+}
+
+// --- Config types ---
 
 #[allow(dead_code)]
 #[derive(serde::Deserialize)]
@@ -270,125 +359,4 @@ struct MsvcupSettings {
     install_dir: Option<String>,
     lock_file: String,
     target_arch: String,
-}
-
-/// Parse a vcvars .bat file and update environment variables.
-///
-/// Each line in a vcvars bat file looks like:
-///   set "PATH=%~dp0..\..\VC\Tools;%PATH%"
-///
-/// We extract the variable name, the new path entries (replacing %~dp0 with the
-/// bat file's directory), and prepend them to the existing env var.
-#[cfg(windows)]
-fn load_vcvars(vcvars_path: &str) -> Result<(), String> {
-    use std::env;
-    use std::fs;
-    use std::path::Path;
-
-    let content =
-        fs::read_to_string(vcvars_path).map_err(|e| format!("cannot read '{vcvars_path}': {e}"))?;
-
-    let root_dir = Path::new(vcvars_path)
-        .parent()
-        .ok_or_else(|| format!("invalid vcvars path '{vcvars_path}' missing directory"))?
-        .to_string_lossy();
-
-    for (lineno, line) in content.lines().enumerate() {
-        let lineno = lineno + 1;
-        let line = line.trim_end_matches('\r');
-
-        // Expected format: set "NAME=<paths>;%NAME%"
-        let prefix = "set \"";
-        if !line.starts_with(prefix) {
-            return Err(format!(
-                "{vcvars_path}:{lineno}: line did not start with '{prefix}'"
-            ));
-        }
-        let after_prefix = &line[prefix.len()..];
-
-        let eq_pos = after_prefix
-            .find('=')
-            .ok_or_else(|| format!("{vcvars_path}:{lineno}: missing '=' to end name"))?;
-        let name = &after_prefix[..eq_pos];
-
-        // Verify line ends with ;%NAME%"
-        let expected_suffix = format!(";%{name}%\"");
-        if !line.ends_with(&expected_suffix) {
-            return Err(format!(
-                "{vcvars_path}:{lineno}: line did not end with '{expected_suffix}'"
-            ));
-        }
-
-        // Extract paths between = and ;%NAME%"
-        let paths_start = prefix.len() + eq_pos + 1;
-        let paths_end = line.len() - expected_suffix.len();
-        let paths_str = &line[paths_start..paths_end];
-
-        // Build new paths, replacing %~dp0 with root_dir
-        let dp0 = "%~dp0";
-        let mut new_paths = Vec::new();
-        for path_entry in paths_str.split(';') {
-            if path_entry.is_empty() {
-                continue;
-            }
-            if let Some(rest) = path_entry.strip_prefix(dp0) {
-                new_paths.push(format!("{root_dir}\\{rest}"));
-            } else {
-                return Err(format!(
-                    "{vcvars_path}:{lineno}: path entry does not start with '{dp0}': '{path_entry}'"
-                ));
-            }
-        }
-
-        // Prepend new paths to existing env var
-        let current = env::var(name).unwrap_or_default();
-        let new_value = if current.is_empty() {
-            new_paths.join(";")
-        } else {
-            format!("{};{current}", new_paths.join(";"))
-        };
-        // SAFETY: this binary is single-threaded
-        unsafe {
-            env::set_var(name, &new_value);
-        }
-    }
-    Ok(())
-}
-
-/// Search PATH for an executable, skipping the directory `skip_dir` (our own dir).
-#[cfg(windows)]
-fn find_in_path(exe_name: &str, skip_dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    use std::env;
-    use std::path::PathBuf;
-
-    let path_var = env::var("PATH").ok()?;
-    for dir in path_var.split(';') {
-        if dir.is_empty() {
-            continue;
-        }
-        let dir_path = PathBuf::from(dir);
-        // Skip our own directory to avoid infinite recursion
-        if same_dir(&dir_path, skip_dir) {
-            continue;
-        }
-        let candidate = dir_path.join(exe_name);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-/// Check if two directory paths refer to the same directory.
-#[cfg(windows)]
-fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
-    // Try canonical comparison first, fall back to string comparison
-    match (a.canonicalize(), b.canonicalize()) {
-        (Ok(ca), Ok(cb)) => ca == cb,
-        _ => {
-            // Fall back to case-insensitive comparison on Windows
-            a.to_string_lossy()
-                .eq_ignore_ascii_case(&b.to_string_lossy())
-        }
-    }
 }
