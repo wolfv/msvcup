@@ -41,6 +41,10 @@ impl std::io::Write for IndicatifWriter {
 #[derive(Parser)]
 #[command(name = "msvcup", version, about = "MSVC package installer")]
 struct Cli {
+    /// Enable verbose output (timing, detailed progress)
+    #[arg(short, long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -119,13 +123,14 @@ fn parse_msvcup_packages(pkg_strings: &[String]) -> Result<Vec<MsvcupPackage>> {
 async fn main() -> Result<()> {
     let mp = MultiProgress::new();
 
+    let cli = Cli::parse();
+
     // Route log output through MultiProgress so logs don't clobber progress bars
     let mp_writer = IndicatifWriter(mp.clone());
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+    let default_filter = if cli.verbose { "debug" } else { "info" };
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_filter))
         .target(env_logger::Target::Pipe(Box::new(mp_writer)))
         .init();
-
-    let cli = Cli::parse();
     let client = reqwest::Client::builder().build()?;
     let default_msvcup_dir = manifest::MsvcupDir::new()?;
 

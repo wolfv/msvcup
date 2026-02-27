@@ -20,7 +20,7 @@ source:
   - path: ../
 
 build:
-  number: 7
+  number: 8
 
 outputs:
   # --- msvcup CLI tool ---

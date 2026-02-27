@@ -175,6 +175,9 @@ async fn install_from_lock_file(
     // Media table is read to discover needed CABs, those CABs are fetched,
     // and then the MSI is extracted.
 
+    let install_start = std::time::Instant::now();
+    log::debug!("{} payloads to install", install_entries.len());
+
     let total = install_entries.len() as u64;
     let pb = mp.add(ProgressBar::new(total));
     pb.set_style(
@@ -203,6 +206,7 @@ async fn install_from_lock_file(
         let payload_name = basename_from_url(&url).to_string();
 
         handles.push(tokio::spawn(async move {
+            let t_start = std::time::Instant::now();
             let name = basename_from_url(&url);
             let cache_path = cache_entry_path(&cache_dir, &sha256, name);
 
@@ -211,6 +215,8 @@ async fn install_from_lock_file(
                 let _permit = download_sem.acquire().await.unwrap();
                 fetch_payload_async(&client, &sha256, &url, &cache_path, &mp).await?;
             }
+            let t_download = t_start.elapsed();
+            log::debug!("{}: downloaded in {:.1?}", payload_name, t_download);
 
             // Step 2: For MSIs, discover needed CABs and fetch them
             if get_lock_file_url_kind(&url) == Some(LockFileUrlKind::Msi) {
@@ -222,42 +228,50 @@ async fn install_from_lock_file(
                 .unwrap()
                 .with_context(|| format!("reading cab names from '{}'", payload_name))?;
 
+                let needed: Vec<_> = cab_names
+                    .iter()
+                    .filter(|c| !c.starts_with('#'))
+                    .filter_map(|c| cab_info.get(c.as_str()))
+                    .collect();
+                log::debug!(
+                    "{}: {} CABs needed (of {} in Media table)",
+                    payload_name,
+                    needed.len(),
+                    cab_names.len()
+                );
+
                 let mut cab_handles = Vec::new();
-                for cab_name in cab_names {
-                    if cab_name.starts_with('#') {
-                        continue;
-                    }
-                    if let Some((cab_url, cab_sha256)) = cab_info.get(&cab_name) {
-                        let client = client.clone();
-                        let mp = mp.clone();
-                        let download_sem = download_sem.clone();
-                        let cab_url = cab_url.clone();
-                        let cab_sha256 = *cab_sha256;
-                        let cache_dir = cache_dir.clone();
-                        cab_handles.push(tokio::spawn(async move {
-                            let _permit = download_sem.acquire().await.unwrap();
-                            let cab_cache_name = basename_from_url(&cab_url);
-                            let cab_cache_path =
-                                cache_entry_path(&cache_dir, &cab_sha256, cab_cache_name);
-                            fetch_payload_async(
-                                &client,
-                                &cab_sha256,
-                                &cab_url,
-                                &cab_cache_path,
-                                &mp,
-                            )
+                for (cab_url, cab_sha256) in needed {
+                    let client = client.clone();
+                    let mp = mp.clone();
+                    let download_sem = download_sem.clone();
+                    let cab_url = cab_url.clone();
+                    let cab_sha256 = *cab_sha256;
+                    let cache_dir = cache_dir.clone();
+                    cab_handles.push(tokio::spawn(async move {
+                        let _permit = download_sem.acquire().await.unwrap();
+                        let cab_cache_name = basename_from_url(&cab_url);
+                        let cab_cache_path =
+                            cache_entry_path(&cache_dir, &cab_sha256, cab_cache_name);
+                        fetch_payload_async(&client, &cab_sha256, &cab_url, &cab_cache_path, &mp)
                             .await
-                        }));
-                    }
+                    }));
                 }
                 for h in cab_handles {
                     h.await.unwrap()?;
                 }
+                log::debug!(
+                    "{}: CABs fetched in {:.1?}",
+                    payload_name,
+                    t_start.elapsed() - t_download
+                );
             }
 
             // Step 3: Extract
+            let t_before_extract = std::time::Instant::now();
             {
                 let _permit = extract_sem.acquire().await.unwrap();
+                let t_extract_start = std::time::Instant::now();
                 tokio::task::spawn_blocking(move || {
                     install_payload(
                         &install_path,
@@ -271,8 +285,15 @@ async fn install_from_lock_file(
                 .await
                 .unwrap()
                 .with_context(|| format!("installing payload '{}'", payload_name))?;
+                log::debug!(
+                    "{}: extracted in {:.1?} (waited {:.1?} for slot)",
+                    payload_name,
+                    t_extract_start.elapsed(),
+                    t_before_extract.elapsed() - t_extract_start.elapsed()
+                );
             }
 
+            log::debug!("{}: total {:.1?}", payload_name, t_start.elapsed());
             pb.inc(1);
             Ok::<(), anyhow::Error>(())
         }));
@@ -282,6 +303,7 @@ async fn install_from_lock_file(
         handle.await.unwrap()?;
     }
     pb.finish_and_clear();
+    log::debug!("install completed in {:.1?}", install_start.elapsed());
 
     // Finish packages (generate vcvars bat files and env JSON)
     for msvcup_pkg in msvcup_pkgs {
@@ -417,7 +439,10 @@ fn install_payload(
 /// Removes any files that were newly created by the interrupted payload.
 fn clean_up_pending(pending_path: &Path) -> Result<()> {
     if let Ok(content) = fs::read_to_string(pending_path) {
-        log::debug!("found interrupted install manifest '{}', cleaning up...", pending_path.display());
+        log::debug!(
+            "found interrupted install manifest '{}', cleaning up...",
+            pending_path.display()
+        );
         let mut lines = content.lines();
         let _cache_basename = lines.next(); // skip first line (cache basename)
         for line in lines {
@@ -466,12 +491,8 @@ fn finalize_manifest(installed_manifest_path: &Path, pending_path: &Path) -> Res
         out.flush()?;
     }
 
-    fs::remove_file(pending_path).with_context(|| {
-        format!(
-            "removing pending manifest '{}'",
-            pending_path.display()
-        )
-    })?;
+    fs::remove_file(pending_path)
+        .with_context(|| format!("removing pending manifest '{}'", pending_path.display()))?;
     fs::rename(&tmp_path, installed_manifest_path).with_context(|| {
         format!(
             "renaming '{}' to '{}'",
@@ -513,10 +534,7 @@ fn install_msi(
     // Stage only the needed CAB files (already pre-fetched in Pass 2)
     // Use a unique staging dir per MSI to avoid races when multiple MSIs
     // for the same package are extracted in parallel.
-    let msi_stem = msi_path
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy();
+    let msi_stem = msi_path.file_stem().unwrap_or_default().to_string_lossy();
     let staging_dir = install_dir_path.join(format!(".msi-staging-{}", msi_stem));
     let _ = fs::remove_dir_all(&staging_dir);
     fs::create_dir_all(&staging_dir)?;
