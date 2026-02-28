@@ -41,3 +41,49 @@ impl ChannelKind {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_urls_are_https() {
+        assert!(ChannelKind::Release.https_url().starts_with("https://"));
+        assert!(ChannelKind::Preview.https_url().starts_with("https://"));
+    }
+
+    #[test]
+    fn release_and_preview_have_different_urls() {
+        assert_ne!(
+            ChannelKind::Release.https_url(),
+            ChannelKind::Preview.https_url()
+        );
+    }
+
+    #[test]
+    fn manifest_channel_ids_differ() {
+        assert_ne!(
+            ChannelKind::Release.vs_manifest_channel_id(),
+            ChannelKind::Preview.vs_manifest_channel_id()
+        );
+    }
+
+    #[test]
+    fn subdirs_are_distinct() {
+        assert_ne!(ChannelKind::Release.subdir(), ChannelKind::Preview.subdir());
+        assert_ne!(
+            ChannelKind::Release.channel_subdir(),
+            ChannelKind::Preview.channel_subdir()
+        );
+        assert_ne!(
+            ChannelKind::Release.channel_url_subdir(),
+            ChannelKind::Preview.channel_url_subdir()
+        );
+    }
+
+    #[test]
+    fn subdirs_contain_release_or_preview() {
+        assert!(ChannelKind::Release.subdir().contains("release"));
+        assert!(ChannelKind::Preview.subdir().contains("preview"));
+    }
+}
