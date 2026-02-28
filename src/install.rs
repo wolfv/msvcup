@@ -926,3 +926,180 @@ pub fn update_lock_file(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap as StdHashMap;
+
+    // --- generate_vcvars_bat tests ---
+
+    #[test]
+    fn vcvars_bat_msvc_contains_paths() {
+        let bat = generate_vcvars_bat(FinishKind::Msvc, "14.43.34808", Arch::X64);
+        assert!(bat.contains("INCLUDE"));
+        assert!(bat.contains("PATH"));
+        assert!(bat.contains("LIB"));
+        assert!(bat.contains("14.43.34808"));
+        assert!(bat.contains("MSVC"));
+    }
+
+    #[test]
+    fn vcvars_bat_sdk_contains_windows_kits() {
+        let bat = generate_vcvars_bat(FinishKind::Sdk, "10.0.22621.0", Arch::X64);
+        assert!(bat.contains("Windows Kits"));
+        assert!(bat.contains("10.0.22621.0"));
+        assert!(bat.contains("ucrt"));
+        assert!(bat.contains("um"));
+        assert!(bat.contains("shared"));
+    }
+
+    #[test]
+    fn vcvars_bat_uses_target_arch() {
+        let bat_x86 = generate_vcvars_bat(FinishKind::Msvc, "14.43.34808", Arch::X86);
+        assert!(bat_x86.contains("x86"));
+
+        let bat_arm64 = generate_vcvars_bat(FinishKind::Msvc, "14.43.34808", Arch::Arm64);
+        assert!(bat_arm64.contains("arm64"));
+    }
+
+    // --- generate_env_json tests ---
+
+    #[test]
+    fn env_json_msvc_structure() {
+        let json = generate_env_json(
+            FinishKind::Msvc,
+            "14.43.34808",
+            Arch::X64,
+            Path::new("C:\\msvcup\\msvc-14.43.34808"),
+        );
+        let parsed: StdHashMap<String, Vec<String>> = serde_json::from_str(&json).unwrap();
+
+        assert!(parsed.contains_key("INCLUDE"));
+        assert!(parsed.contains_key("PATH"));
+        assert!(parsed.contains_key("LIB"));
+
+        let include = &parsed["INCLUDE"];
+        assert_eq!(include.len(), 1);
+        assert!(include[0].contains("MSVC"));
+        assert!(include[0].contains("14.43.34808"));
+    }
+
+    #[test]
+    fn env_json_sdk_has_multiple_include_dirs() {
+        let json = generate_env_json(
+            FinishKind::Sdk,
+            "10.0.22621.0",
+            Arch::X64,
+            Path::new("C:\\msvcup\\sdk-10.0.22621.0"),
+        );
+        let parsed: StdHashMap<String, Vec<String>> = serde_json::from_str(&json).unwrap();
+
+        let include = &parsed["INCLUDE"];
+        // SDK should have ucrt, shared, um, winrt, cppwinrt
+        assert_eq!(include.len(), 5);
+        assert!(include.iter().any(|p| p.contains("ucrt")));
+        assert!(include.iter().any(|p| p.contains("shared")));
+        assert!(include.iter().any(|p| p.contains("um")));
+        assert!(include.iter().any(|p| p.contains("winrt")));
+        assert!(include.iter().any(|p| p.contains("cppwinrt")));
+
+        let lib = &parsed["LIB"];
+        assert_eq!(lib.len(), 2); // ucrt + um
+    }
+
+    #[test]
+    fn env_json_respects_target_arch() {
+        let json_arm64 = generate_env_json(
+            FinishKind::Msvc,
+            "14.43.34808",
+            Arch::Arm64,
+            Path::new("C:\\install"),
+        );
+        let parsed: StdHashMap<String, Vec<String>> = serde_json::from_str(&json_arm64).unwrap();
+        assert!(parsed["LIB"][0].contains("arm64"));
+    }
+
+    // --- query_install_version tests ---
+
+    #[test]
+    fn query_install_version_msvc() {
+        let dir = std::env::temp_dir().join("msvcup_test_query_version_msvc");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let version_dir = dir
+            .join("VC")
+            .join("Tools")
+            .join("MSVC")
+            .join("14.43.34808");
+        std::fs::create_dir_all(&version_dir).unwrap();
+
+        let version = query_install_version(FinishKind::Msvc, &dir).unwrap();
+        assert_eq!(version, "14.43.34808");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn query_install_version_sdk() {
+        let dir = std::env::temp_dir().join("msvcup_test_query_version_sdk");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let version_dir = dir
+            .join("Windows Kits")
+            .join("10")
+            .join("Include")
+            .join("10.0.22621.0");
+        std::fs::create_dir_all(&version_dir).unwrap();
+
+        let version = query_install_version(FinishKind::Sdk, &dir).unwrap();
+        assert_eq!(version, "10.0.22621.0");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn query_install_version_no_version_dir() {
+        let dir = std::env::temp_dir().join("msvcup_test_query_version_none");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let empty_dir = dir.join("VC").join("Tools").join("MSVC");
+        std::fs::create_dir_all(&empty_dir).unwrap();
+
+        let result = query_install_version(FinishKind::Msvc, &dir);
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn query_install_version_multiple_versions_errors() {
+        let dir = std::env::temp_dir().join("msvcup_test_query_version_multi");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let base = dir.join("VC").join("Tools").join("MSVC");
+        std::fs::create_dir_all(base.join("14.43.34808")).unwrap();
+        std::fs::create_dir_all(base.join("14.44.17.0")).unwrap();
+
+        let result = query_install_version(FinishKind::Msvc, &dir);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("multiple"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn query_install_version_ignores_non_version_dirs() {
+        let dir = std::env::temp_dir().join("msvcup_test_query_version_ignore");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let base = dir.join("VC").join("Tools").join("MSVC");
+        std::fs::create_dir_all(base.join("14.43.34808")).unwrap();
+        std::fs::create_dir_all(base.join("auxiliary")).unwrap(); // not a version
+
+        let version = query_install_version(FinishKind::Msvc, &dir).unwrap();
+        assert_eq!(version, "14.43.34808");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

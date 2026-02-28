@@ -461,3 +461,393 @@ fn extract_cab<R: Read + io::Seek>(
 
     Ok(extracted)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- get_long_filename ---
+
+    #[test]
+    fn long_filename_with_pipe() {
+        assert_eq!(get_long_filename("READM~1.TXT|readme.txt"), "readme.txt");
+    }
+
+    #[test]
+    fn long_filename_without_pipe() {
+        assert_eq!(get_long_filename("readme.txt"), "readme.txt");
+    }
+
+    #[test]
+    fn long_filename_empty() {
+        assert_eq!(get_long_filename(""), "");
+    }
+
+    #[test]
+    fn long_filename_pipe_at_start() {
+        assert_eq!(get_long_filename("|long_name.dll"), "long_name.dll");
+    }
+
+    // --- resolve_directory_path ---
+
+    fn make_dir_table(entries: &[(&str, &str, &str)]) -> HashMap<String, (String, String)> {
+        entries
+            .iter()
+            .map(|(id, parent, default)| {
+                (id.to_string(), (parent.to_string(), default.to_string()))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn resolve_single_directory() {
+        let table = make_dir_table(&[("dir1", "", "mydir")]);
+        let mut cache = HashMap::new();
+        assert_eq!(resolve_directory_path("dir1", &table, &mut cache), "mydir");
+    }
+
+    #[test]
+    fn resolve_nested_directories() {
+        let table = make_dir_table(&[
+            ("TARGETDIR", "", "."),
+            ("ProgramFiles", "TARGETDIR", "Program Files"),
+            ("MyApp", "ProgramFiles", "MyApp"),
+        ]);
+        let mut cache = HashMap::new();
+        let sep = std::path::MAIN_SEPARATOR_STR;
+        assert_eq!(
+            resolve_directory_path("MyApp", &table, &mut cache),
+            format!("Program Files{}MyApp", sep)
+        );
+    }
+
+    #[test]
+    fn resolve_skips_dot_and_sourcedir() {
+        let table = make_dir_table(&[
+            ("TARGETDIR", "", "SourceDir"),
+            ("subdir", "TARGETDIR", "sub"),
+        ]);
+        let mut cache = HashMap::new();
+        assert_eq!(resolve_directory_path("subdir", &table, &mut cache), "sub");
+    }
+
+    #[test]
+    fn resolve_short_long_format() {
+        let table = make_dir_table(&[("dir1", "", "PROGRA~1|Program Files")]);
+        let mut cache = HashMap::new();
+        assert_eq!(
+            resolve_directory_path("dir1", &table, &mut cache),
+            "Program Files"
+        );
+    }
+
+    #[test]
+    fn resolve_colon_format() {
+        let table = make_dir_table(&[("dir1", "", "short:longname")]);
+        let mut cache = HashMap::new();
+        assert_eq!(
+            resolve_directory_path("dir1", &table, &mut cache),
+            "longname"
+        );
+    }
+
+    #[test]
+    fn resolve_caches_result() {
+        let table = make_dir_table(&[("dir1", "", "mydir")]);
+        let mut cache = HashMap::new();
+        resolve_directory_path("dir1", &table, &mut cache);
+        assert!(cache.contains_key("dir1"));
+        // Second call should return cached value
+        assert_eq!(resolve_directory_path("dir1", &table, &mut cache), "mydir");
+    }
+
+    #[test]
+    fn resolve_unknown_directory() {
+        let table = HashMap::new();
+        let mut cache = HashMap::new();
+        assert_eq!(
+            resolve_directory_path("nonexistent", &table, &mut cache),
+            ""
+        );
+    }
+
+    #[test]
+    fn resolve_cycle_detection() {
+        // dir1 -> dir2 -> dir1 (cycle)
+        let table = make_dir_table(&[("dir1", "dir2", "a"), ("dir2", "dir1", "b")]);
+        let mut cache = HashMap::new();
+        // Should not infinite-loop; result depends on traversal order
+        let result = resolve_directory_path("dir1", &table, &mut cache);
+        assert!(!result.is_empty()); // Just verify it terminates
+    }
+
+    #[test]
+    fn resolve_deeply_nested() {
+        let table = make_dir_table(&[
+            ("TARGETDIR", "", "."),
+            ("L1", "TARGETDIR", "level1"),
+            ("L2", "L1", "level2"),
+            ("L3", "L2", "level3"),
+            ("L4", "L3", "level4"),
+        ]);
+        let mut cache = HashMap::new();
+        let sep = std::path::MAIN_SEPARATOR_STR;
+        assert_eq!(
+            resolve_directory_path("L4", &table, &mut cache),
+            format!("level1{}level2{}level3{}level4", sep, sep, sep)
+        );
+    }
+
+    // --- extract_cab with synthetic CAB data ---
+
+    fn create_test_cab(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut builder = cab::CabinetBuilder::new();
+        let folder = builder.add_folder(cab::CompressionType::None);
+        for (name, _data) in files {
+            folder.add_file(*name);
+        }
+        let mut output = io::Cursor::new(Vec::new());
+        let mut writer = builder.build(&mut output).unwrap();
+        for (_name, data) in files {
+            let mut file_writer = writer.next_file().unwrap().unwrap();
+            file_writer.write_all(data).unwrap();
+        }
+        writer.finish().unwrap();
+        output.into_inner()
+    }
+
+    #[test]
+    fn extract_cab_with_file_table() {
+        let cab_data = create_test_cab(&[("file1_key", b"hello world")]);
+
+        let install_dir = std::env::temp_dir().join("msvcup_test_extract_cab_ft");
+        let _ = std::fs::remove_dir_all(&install_dir);
+        std::fs::create_dir_all(&install_dir).unwrap();
+
+        let manifest_path = install_dir.join("manifest.txt");
+        let mut manifest_file = fs::File::create(&manifest_path).unwrap();
+
+        let mut file_table = HashMap::new();
+        file_table.insert(
+            "file1_key".to_string(),
+            FileEntry {
+                file_name: "SHORT~1.TXT|hello.txt".to_string(),
+                component: "comp1".to_string(),
+            },
+        );
+
+        let mut component_table = HashMap::new();
+        component_table.insert("comp1".to_string(), "subdir1".to_string());
+
+        let mut directory_table = HashMap::new();
+        directory_table.insert(
+            "subdir1".to_string(),
+            ("".to_string(), "myfiles".to_string()),
+        );
+
+        let cursor = io::Cursor::new(cab_data);
+        let count = extract_cab(
+            cursor,
+            &install_dir,
+            &file_table,
+            &component_table,
+            &directory_table,
+            &mut manifest_file,
+        )
+        .unwrap();
+
+        assert_eq!(count, 1);
+
+        let extracted_path = install_dir.join("myfiles").join("hello.txt");
+        assert!(extracted_path.exists());
+        assert_eq!(
+            std::fs::read_to_string(&extracted_path).unwrap(),
+            "hello world"
+        );
+
+        // Verify manifest
+        drop(manifest_file);
+        let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+        assert!(manifest.contains("new"));
+        assert!(manifest.contains("hello.txt"));
+
+        let _ = std::fs::remove_dir_all(&install_dir);
+    }
+
+    #[test]
+    fn extract_cab_without_file_table_uses_cab_name() {
+        let cab_data = create_test_cab(&[("raw_file.dat", b"raw content")]);
+
+        let install_dir = std::env::temp_dir().join("msvcup_test_extract_cab_raw");
+        let _ = std::fs::remove_dir_all(&install_dir);
+        std::fs::create_dir_all(&install_dir).unwrap();
+
+        let manifest_path = install_dir.join("manifest.txt");
+        let mut manifest_file = fs::File::create(&manifest_path).unwrap();
+
+        let file_table = HashMap::new(); // empty
+        let component_table = HashMap::new();
+        let directory_table = HashMap::new();
+
+        let cursor = io::Cursor::new(cab_data);
+        let count = extract_cab(
+            cursor,
+            &install_dir,
+            &file_table,
+            &component_table,
+            &directory_table,
+            &mut manifest_file,
+        )
+        .unwrap();
+
+        assert_eq!(count, 1);
+        let extracted_path = install_dir.join("raw_file.dat");
+        assert!(extracted_path.exists());
+        assert_eq!(
+            std::fs::read_to_string(&extracted_path).unwrap(),
+            "raw content"
+        );
+
+        let _ = std::fs::remove_dir_all(&install_dir);
+    }
+
+    #[test]
+    fn extract_cab_multiple_files() {
+        let cab_data = create_test_cab(&[
+            ("file_a", b"content_a"),
+            ("file_b", b"content_b"),
+            ("file_c", b"content_c"),
+        ]);
+
+        let install_dir = std::env::temp_dir().join("msvcup_test_extract_cab_multi");
+        let _ = std::fs::remove_dir_all(&install_dir);
+        std::fs::create_dir_all(&install_dir).unwrap();
+
+        let manifest_path = install_dir.join("manifest.txt");
+        let mut manifest_file = fs::File::create(&manifest_path).unwrap();
+
+        let file_table = HashMap::new();
+        let component_table = HashMap::new();
+        let directory_table = HashMap::new();
+
+        let cursor = io::Cursor::new(cab_data);
+        let count = extract_cab(
+            cursor,
+            &install_dir,
+            &file_table,
+            &component_table,
+            &directory_table,
+            &mut manifest_file,
+        )
+        .unwrap();
+
+        assert_eq!(count, 3);
+        assert!(install_dir.join("file_a").exists());
+        assert!(install_dir.join("file_b").exists());
+        assert!(install_dir.join("file_c").exists());
+
+        let _ = std::fs::remove_dir_all(&install_dir);
+    }
+
+    #[test]
+    fn extract_cab_existing_file_skipped() {
+        let cab_data = create_test_cab(&[("existing_file", b"new content")]);
+
+        let install_dir = std::env::temp_dir().join("msvcup_test_extract_cab_exist");
+        let _ = std::fs::remove_dir_all(&install_dir);
+        std::fs::create_dir_all(&install_dir).unwrap();
+
+        // Pre-create the file
+        std::fs::write(install_dir.join("existing_file"), "old content").unwrap();
+
+        let manifest_path = install_dir.join("manifest.txt");
+        let mut manifest_file = fs::File::create(&manifest_path).unwrap();
+
+        let file_table = HashMap::new();
+        let component_table = HashMap::new();
+        let directory_table = HashMap::new();
+
+        let cursor = io::Cursor::new(cab_data);
+        let count = extract_cab(
+            cursor,
+            &install_dir,
+            &file_table,
+            &component_table,
+            &directory_table,
+            &mut manifest_file,
+        )
+        .unwrap();
+
+        // Existing files are not re-extracted
+        assert_eq!(count, 0);
+
+        // Manifest should say "add" not "new"
+        drop(manifest_file);
+        let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+        assert!(manifest.contains("add"));
+
+        // Content unchanged
+        assert_eq!(
+            std::fs::read_to_string(install_dir.join("existing_file")).unwrap(),
+            "old content"
+        );
+
+        let _ = std::fs::remove_dir_all(&install_dir);
+    }
+
+    #[test]
+    fn extract_cab_nested_directory_resolution() {
+        let cab_data = create_test_cab(&[("key1", b"data")]);
+
+        let install_dir = std::env::temp_dir().join("msvcup_test_extract_cab_nested");
+        let _ = std::fs::remove_dir_all(&install_dir);
+        std::fs::create_dir_all(&install_dir).unwrap();
+
+        let manifest_path = install_dir.join("manifest.txt");
+        let mut manifest_file = fs::File::create(&manifest_path).unwrap();
+
+        let mut file_table = HashMap::new();
+        file_table.insert(
+            "key1".to_string(),
+            FileEntry {
+                file_name: "output.dll".to_string(),
+                component: "comp1".to_string(),
+            },
+        );
+
+        let mut component_table = HashMap::new();
+        component_table.insert("comp1".to_string(), "leaf_dir".to_string());
+
+        let mut directory_table = HashMap::new();
+        directory_table.insert(
+            "TARGETDIR".to_string(),
+            ("".to_string(), "SourceDir".to_string()),
+        );
+        directory_table.insert(
+            "parent_dir".to_string(),
+            ("TARGETDIR".to_string(), "lib".to_string()),
+        );
+        directory_table.insert(
+            "leaf_dir".to_string(),
+            ("parent_dir".to_string(), "x64".to_string()),
+        );
+
+        let cursor = io::Cursor::new(cab_data);
+        let count = extract_cab(
+            cursor,
+            &install_dir,
+            &file_table,
+            &component_table,
+            &directory_table,
+            &mut manifest_file,
+        )
+        .unwrap();
+
+        assert_eq!(count, 1);
+        let expected_path = install_dir.join("lib").join("x64").join("output.dll");
+        assert!(expected_path.exists());
+        assert_eq!(std::fs::read(&expected_path).unwrap(), b"data");
+
+        let _ = std::fs::remove_dir_all(&install_dir);
+    }
+}
