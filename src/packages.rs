@@ -640,3 +640,349 @@ pub enum ManifestUpdate {
     Daily,
     Always,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- MsvcupPackageKind tests ---
+
+    #[test]
+    fn package_kind_as_str() {
+        assert_eq!(MsvcupPackageKind::Msvc.as_str(), "msvc");
+        assert_eq!(MsvcupPackageKind::Sdk.as_str(), "sdk");
+        assert_eq!(MsvcupPackageKind::Msbuild.as_str(), "msbuild");
+        assert_eq!(MsvcupPackageKind::Diasdk.as_str(), "diasdk");
+        assert_eq!(MsvcupPackageKind::Ninja.as_str(), "ninja");
+        assert_eq!(MsvcupPackageKind::Cmake.as_str(), "cmake");
+    }
+
+    #[test]
+    fn package_kind_from_prefix() {
+        let (kind, version) = MsvcupPackageKind::from_prefix("msvc-14.30.17.6").unwrap();
+        assert_eq!(kind, MsvcupPackageKind::Msvc);
+        assert_eq!(version, "14.30.17.6");
+
+        let (kind, version) = MsvcupPackageKind::from_prefix("sdk-10.0.22621.7").unwrap();
+        assert_eq!(kind, MsvcupPackageKind::Sdk);
+        assert_eq!(version, "10.0.22621.7");
+
+        let (kind, _) = MsvcupPackageKind::from_prefix("ninja-1.12.1").unwrap();
+        assert_eq!(kind, MsvcupPackageKind::Ninja);
+
+        let (kind, _) = MsvcupPackageKind::from_prefix("cmake-3.31.4").unwrap();
+        assert_eq!(kind, MsvcupPackageKind::Cmake);
+
+        assert!(MsvcupPackageKind::from_prefix("unknown-1.0").is_none());
+        assert!(MsvcupPackageKind::from_prefix("").is_none());
+    }
+
+    #[test]
+    fn package_kind_display() {
+        assert_eq!(format!("{}", MsvcupPackageKind::Msvc), "msvc");
+        assert_eq!(format!("{}", MsvcupPackageKind::Sdk), "sdk");
+    }
+
+    // --- MsvcupPackage tests ---
+
+    #[test]
+    fn msvcup_package_from_string_valid() {
+        let pkg = MsvcupPackage::from_string("msvc-14.30.17.6").unwrap();
+        assert_eq!(pkg.kind, MsvcupPackageKind::Msvc);
+        assert_eq!(pkg.version, "14.30.17.6");
+
+        let pkg = MsvcupPackage::from_string("sdk-10.0.22621.7").unwrap();
+        assert_eq!(pkg.kind, MsvcupPackageKind::Sdk);
+        assert_eq!(pkg.version, "10.0.22621.7");
+    }
+
+    #[test]
+    fn msvcup_package_from_string_invalid_name() {
+        let err = MsvcupPackage::from_string("unknown-1.0").unwrap_err();
+        assert!(matches!(err, MsvcupPackageParseError::UnknownName));
+    }
+
+    #[test]
+    fn msvcup_package_from_string_invalid_version() {
+        let err = MsvcupPackage::from_string("msvc-abc").unwrap_err();
+        assert!(matches!(err, MsvcupPackageParseError::InvalidVersion(_)));
+    }
+
+    #[test]
+    fn msvcup_package_display() {
+        let pkg = MsvcupPackage::new(MsvcupPackageKind::Msvc, "14.30.17.6");
+        assert_eq!(format!("{}", pkg), "msvc-14.30.17.6");
+    }
+
+    #[test]
+    fn msvcup_package_pool_string() {
+        let pkg = MsvcupPackage::new(MsvcupPackageKind::Sdk, "10.0.22621.7");
+        assert_eq!(pkg.pool_string(), "sdk-10.0.22621.7");
+    }
+
+    #[test]
+    fn msvcup_package_order_by_kind_first() {
+        let msvc = MsvcupPackage::new(MsvcupPackageKind::Msvc, "14.30.17.6");
+        let sdk = MsvcupPackage::new(MsvcupPackageKind::Sdk, "10.0.22621.7");
+        assert_eq!(MsvcupPackage::order(&msvc, &sdk), Ordering::Less);
+    }
+
+    #[test]
+    fn msvcup_package_order_by_version() {
+        let a = MsvcupPackage::new(MsvcupPackageKind::Msvc, "14.30.17.6");
+        let b = MsvcupPackage::new(MsvcupPackageKind::Msvc, "14.31.0.0");
+        assert_eq!(MsvcupPackage::order(&a, &b), Ordering::Less);
+        assert_eq!(MsvcupPackage::order(&b, &a), Ordering::Greater);
+        assert_eq!(MsvcupPackage::order(&a, &a), Ordering::Equal);
+    }
+
+    // --- PackageId / identify_package tests ---
+
+    #[test]
+    fn identify_msvc_host_target() {
+        let id = "Microsoft.VC.14.43.Tools.HostX64.TargetX64.base";
+        match identify_package(id) {
+            PackageId::MsvcVersionHostTarget {
+                build_version,
+                host_arch,
+                target_arch,
+                name,
+            } => {
+                assert_eq!(build_version, "14.43");
+                assert_eq!(host_arch, Arch::X64);
+                assert_eq!(target_arch, Arch::X64);
+                assert_eq!(name, "base");
+            }
+            other => panic!("expected MsvcVersionHostTarget, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn identify_msvc_host_target_arm64() {
+        let id = "Microsoft.VC.14.43.Tools.HostArm64.TargetArm64.base";
+        match identify_package(id) {
+            PackageId::MsvcVersionHostTarget {
+                host_arch,
+                target_arch,
+                ..
+            } => {
+                assert_eq!(host_arch, Arch::Arm64);
+                assert_eq!(target_arch, Arch::Arm64);
+            }
+            other => panic!("expected MsvcVersionHostTarget, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn identify_msbuild() {
+        assert!(matches!(
+            identify_package("Microsoft.Build"),
+            PackageId::Msbuild("170")
+        ));
+        assert!(matches!(
+            identify_package("Microsoft.Build.Arm64"),
+            PackageId::Msbuild("170")
+        ));
+        assert!(matches!(
+            identify_package("Microsoft.VisualStudio.VC.MSBuild.v170"),
+            PackageId::Msbuild("170")
+        ));
+    }
+
+    #[test]
+    fn identify_diasdk() {
+        assert!(matches!(
+            identify_package("Microsoft.VisualCpp.DIA.SDK"),
+            PackageId::Diasdk
+        ));
+    }
+
+    #[test]
+    fn identify_ninja() {
+        match identify_package("ninja-1.12.1") {
+            PackageId::Ninja(v) => assert_eq!(v, "1.12.1"),
+            other => panic!("expected Ninja, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn identify_cmake() {
+        match identify_package("cmake-3.31.4") {
+            PackageId::Cmake(v) => assert_eq!(v, "3.31.4"),
+            other => panic!("expected Cmake, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn identify_unknown() {
+        assert!(matches!(
+            identify_package("some.random.package"),
+            PackageId::Unknown
+        ));
+        assert!(matches!(identify_package(""), PackageId::Unknown));
+    }
+
+    // --- PayloadId / identify_payload tests ---
+
+    #[test]
+    fn identify_sdk_payloads() {
+        assert_eq!(
+            identify_payload(
+                "Installers\\Universal CRT Headers Libraries and Sources-x86_en-us.msi",
+                Arch::X64
+            ),
+            PayloadId::Sdk
+        );
+        assert_eq!(
+            identify_payload(
+                "Installers\\Windows SDK Signing Tools-x86_en-us.msi",
+                Arch::X64
+            ),
+            PayloadId::Sdk
+        );
+    }
+
+    #[test]
+    fn identify_sdk_arch_specific_headers() {
+        assert_eq!(
+            identify_payload(
+                "Installers\\Windows SDK Desktop Headers x64-x86_en-us.msi",
+                Arch::X64
+            ),
+            PayloadId::Sdk
+        );
+        assert_eq!(
+            identify_payload(
+                "Installers\\Windows SDK Desktop Headers arm64-x86_en-us.msi",
+                Arch::X64
+            ),
+            PayloadId::Unknown
+        );
+    }
+
+    #[test]
+    fn identify_sdk_arch_specific_libs() {
+        assert_eq!(
+            identify_payload(
+                "Installers\\Windows SDK Desktop Libs x64-x86_en-us.msi",
+                Arch::X64
+            ),
+            PayloadId::Sdk
+        );
+        assert_eq!(
+            identify_payload(
+                "Installers\\Windows SDK Desktop Libs arm64-x86_en-us.msi",
+                Arch::Arm64
+            ),
+            PayloadId::Sdk
+        );
+    }
+
+    #[test]
+    fn identify_unknown_payload() {
+        assert_eq!(
+            identify_payload("Installers\\Something else.msi", Arch::X64),
+            PayloadId::Unknown
+        );
+    }
+
+    // --- LockFileUrlKind tests ---
+
+    #[test]
+    fn lock_file_url_kind() {
+        assert_eq!(
+            get_lock_file_url_kind("https://example.com/file.vsix"),
+            Some(LockFileUrlKind::Vsix)
+        );
+        assert_eq!(
+            get_lock_file_url_kind("https://example.com/file.msi"),
+            Some(LockFileUrlKind::Msi)
+        );
+        assert_eq!(
+            get_lock_file_url_kind("https://example.com/file.cab"),
+            Some(LockFileUrlKind::Cab)
+        );
+        assert_eq!(
+            get_lock_file_url_kind("https://example.com/file.zip"),
+            Some(LockFileUrlKind::Zip)
+        );
+        assert_eq!(get_lock_file_url_kind("https://example.com/file.exe"), None);
+        assert_eq!(get_lock_file_url_kind(""), None);
+    }
+
+    // --- Language tests ---
+
+    #[test]
+    fn language_from_str() {
+        assert_eq!(Language::from_str("neutral"), Language::Neutral);
+        assert_eq!(Language::from_str("en-US"), Language::EnUs);
+        assert_eq!(Language::from_str("En-Us"), Language::EnUs);
+        assert_eq!(Language::from_str("fr-FR"), Language::Other);
+        assert_eq!(Language::from_str("zh-CN"), Language::Other);
+    }
+
+    // --- get_install_pkg tests ---
+
+    #[test]
+    fn get_install_pkg_msvc_matching_arch() {
+        let result = get_install_pkg(
+            "Microsoft.VC.14.43.Tools.HostX64.TargetX64.base",
+            Arch::X64,
+            Arch::X64,
+        );
+        assert!(result.is_some());
+        match result.unwrap() {
+            InstallPkgKind::Msvc(v) => assert_eq!(v, "14.43"),
+            other => panic!("expected Msvc, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn get_install_pkg_msvc_wrong_host() {
+        let result = get_install_pkg(
+            "Microsoft.VC.14.43.Tools.HostArm64.TargetX64.base",
+            Arch::X64,
+            Arch::X64,
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn get_install_pkg_msvc_wrong_target() {
+        let result = get_install_pkg(
+            "Microsoft.VC.14.43.Tools.HostX64.TargetArm64.base",
+            Arch::X64,
+            Arch::X64,
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn get_install_pkg_msbuild() {
+        let result = get_install_pkg("Microsoft.Build", Arch::X64, Arch::X64);
+        assert!(matches!(result, Some(InstallPkgKind::Msbuild(_))));
+    }
+
+    #[test]
+    fn get_install_pkg_diasdk() {
+        let result = get_install_pkg("Microsoft.VisualCpp.DIA.SDK", Arch::X64, Arch::X64);
+        assert!(matches!(result, Some(InstallPkgKind::Diasdk)));
+    }
+
+    #[test]
+    fn get_install_pkg_unknown() {
+        let result = get_install_pkg("some.random.package", Arch::X64, Arch::X64);
+        assert!(result.is_none());
+    }
+
+    // --- MsvcupPackageParseError Display ---
+
+    #[test]
+    fn parse_error_display() {
+        let err = MsvcupPackageParseError::UnknownName;
+        assert_eq!(format!("{}", err), "unknown package name");
+
+        let err = MsvcupPackageParseError::InvalidVersion("abc".to_string());
+        assert_eq!(format!("{}", err), "invalid version 'abc'");
+    }
+}

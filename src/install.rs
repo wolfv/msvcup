@@ -31,6 +31,7 @@ fn max_concurrent_extractions() -> usize {
         .unwrap_or(4)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn install_command(
     client: &reqwest::Client,
     msvcup_dir: &MsvcupDir,
@@ -51,8 +52,7 @@ pub async fn install_command(
     let cache_dir_str = cache_dir.to_str().unwrap();
 
     let try_no_update = match manifest_update {
-        ManifestUpdate::Off => true,
-        ManifestUpdate::Daily => unimplemented!("daily manifest update"),
+        ManifestUpdate::Off | ManifestUpdate::Daily => true,
         ManifestUpdate::Always => false,
     };
 
@@ -330,12 +330,12 @@ async fn fetch_payload_async(
         let fetch_path = PathBuf::from(format!("{}.fetching", cache_path.display()));
         let actual_sha256 = fetch(client, url_decoded, &fetch_path, Some(mp)).await?;
         if actual_sha256 != *sha256 {
-            log::error!(
-                "SHA256 mismatch:\nexpected: {}\nactual  : {}",
+            bail!(
+                "SHA256 mismatch for '{}':\nexpected: {}\nactual  : {}",
+                url_decoded,
                 sha256,
                 actual_sha256
             );
-            std::process::exit(0xff);
         }
         fs::rename(&fetch_path, cache_path)?;
     }
@@ -605,12 +605,12 @@ fn finish_package(msvcup_dir: &MsvcupDir, msvcup_pkg: &MsvcupPackage) -> Result<
         let bat = generate_vcvars_bat(finish_kind, &install_version, arch);
         let basename = format!("vcvars-{}.bat", arch);
         let bat_path = install_path.join(&basename);
-        update_file(&bat_path, bat.as_bytes())?;
+        crate::util::update_file(&bat_path, bat.as_bytes())?;
 
         let env_json = generate_env_json(finish_kind, &install_version, arch, &install_path);
         let json_basename = format!("env-{}.json", arch);
         let json_path = install_path.join(&json_basename);
-        update_file(&json_path, env_json.as_bytes())?;
+        crate::util::update_file(&json_path, env_json.as_bytes())?;
     }
 
     Ok(())
@@ -771,20 +771,6 @@ fn generate_env_json(
     }
 
     serde_json::to_string_pretty(&env).unwrap()
-}
-
-fn update_file(path: &Path, content: &[u8]) -> Result<()> {
-    let needs_update = match fs::read(path) {
-        Ok(existing) => existing != content,
-        Err(_) => true,
-    };
-    if needs_update {
-        log::debug!("{}: updating...", path.display());
-        fs::write(path, content)?;
-    } else {
-        log::debug!("{}: already up-to-date", path.display());
-    }
-    Ok(())
 }
 
 pub fn update_lock_file(

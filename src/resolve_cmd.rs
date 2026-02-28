@@ -25,8 +25,7 @@ pub async fn resolve_command(
     log::info!("resolving packages...");
 
     let try_no_update = match manifest_update {
-        ManifestUpdate::Off => true,
-        ManifestUpdate::Daily => unimplemented!("daily manifest update"),
+        ManifestUpdate::Off | ManifestUpdate::Daily => true,
         ManifestUpdate::Always => false,
     };
 
@@ -118,7 +117,7 @@ pub async fn resolve_command(
     // Step 4: Generate toolchain.cmake
     let cmake = autoenv_cmd::generate_toolchain_cmake(target_arch, has_msvc, has_sdk);
     let cmake_path = Path::new(out_dir).join("toolchain.cmake");
-    update_file(&cmake_path, cmake.as_bytes())?;
+    crate::util::update_file(&cmake_path, cmake.as_bytes())?;
 
     log::info!("shims placed in '{}'", out_dir);
     log::info!(
@@ -175,20 +174,6 @@ fn update_file_from_file(src: &Path, dest: &Path) -> Result<()> {
         fs::copy(src, dest)?;
     } else {
         log::info!("{}: already up-to-date", dest.display());
-    }
-    Ok(())
-}
-
-fn update_file(path: &Path, content: &[u8]) -> Result<()> {
-    let needs_update = match fs::read(path) {
-        Ok(existing) => existing != content,
-        Err(_) => true,
-    };
-    if needs_update {
-        log::info!("{}: updating...", path.display());
-        fs::write(path, content)?;
-    } else {
-        log::info!("{}: already up-to-date", path.display());
     }
     Ok(())
 }

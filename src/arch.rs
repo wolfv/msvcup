@@ -64,3 +64,69 @@ impl fmt::Display for Arch {
         f.write_str(self.as_str())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_returns_some() {
+        // On any supported CI platform, native() should return Some
+        assert!(Arch::native().is_some());
+    }
+
+    #[test]
+    fn from_str_exact_valid() {
+        assert_eq!(Arch::from_str_exact("x64"), Some(Arch::X64));
+        assert_eq!(Arch::from_str_exact("x86"), Some(Arch::X86));
+        assert_eq!(Arch::from_str_exact("arm"), Some(Arch::Arm));
+        assert_eq!(Arch::from_str_exact("arm64"), Some(Arch::Arm64));
+    }
+
+    #[test]
+    fn from_str_exact_rejects_wrong_case() {
+        assert_eq!(Arch::from_str_exact("X64"), None);
+        assert_eq!(Arch::from_str_exact("ARM64"), None);
+    }
+
+    #[test]
+    fn from_str_exact_rejects_unknown() {
+        assert_eq!(Arch::from_str_exact(""), None);
+        assert_eq!(Arch::from_str_exact("riscv64"), None);
+    }
+
+    #[test]
+    fn from_str_ignore_case_valid() {
+        assert_eq!(Arch::from_str_ignore_case("X64"), Some(Arch::X64));
+        assert_eq!(Arch::from_str_ignore_case("x64"), Some(Arch::X64));
+        assert_eq!(Arch::from_str_ignore_case("X86"), Some(Arch::X86));
+        assert_eq!(Arch::from_str_ignore_case("ARM"), Some(Arch::Arm));
+        assert_eq!(Arch::from_str_ignore_case("Arm64"), Some(Arch::Arm64));
+        assert_eq!(Arch::from_str_ignore_case("ARM64"), Some(Arch::Arm64));
+    }
+
+    #[test]
+    fn from_str_ignore_case_rejects_unknown() {
+        assert_eq!(Arch::from_str_ignore_case(""), None);
+        assert_eq!(Arch::from_str_ignore_case("mips"), None);
+    }
+
+    #[test]
+    fn as_str_roundtrip() {
+        for arch in Arch::ALL {
+            assert_eq!(Arch::from_str_exact(arch.as_str()), Some(arch));
+        }
+    }
+
+    #[test]
+    fn display_matches_as_str() {
+        for arch in Arch::ALL {
+            assert_eq!(format!("{}", arch), arch.as_str());
+        }
+    }
+
+    #[test]
+    fn all_contains_four_variants() {
+        assert_eq!(Arch::ALL.len(), 4);
+    }
+}
