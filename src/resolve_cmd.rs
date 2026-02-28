@@ -25,8 +25,7 @@ pub async fn resolve_command(
     log::info!("resolving packages...");
 
     let try_no_update = match manifest_update {
-        ManifestUpdate::Off => true,
-        ManifestUpdate::Daily => anyhow::bail!("daily manifest update is not yet supported"),
+        ManifestUpdate::Off | ManifestUpdate::Daily => true,
         ManifestUpdate::Always => false,
     };
 

@@ -69,6 +69,33 @@ fn read_file_opt(path: &Path) -> Result<Option<String>> {
     }
 }
 
+/// Read a file only if it exists and was modified less than 24 hours ago.
+fn read_file_if_fresh(path: &Path) -> Result<Option<String>> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(anyhow::anyhow!(e))
+                .with_context(|| format!("reading metadata of '{}'", path.display()));
+        }
+    };
+    let modified = metadata
+        .modified()
+        .with_context(|| format!("reading mtime of '{}'", path.display()))?;
+    let age = std::time::SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or_default();
+    if age > std::time::Duration::from_secs(24 * 60 * 60) {
+        log::debug!(
+            "{}: stale ({}s old), will re-fetch",
+            path.display(),
+            age.as_secs()
+        );
+        return Ok(None);
+    }
+    read_file_opt(path)
+}
+
 /// Fetch a URL to a file, returning the SHA256 hash
 pub async fn fetch(
     client: &reqwest::Client,
@@ -190,7 +217,11 @@ pub async fn read_vs_manifest(
                     return Ok((vsman_latest_path, content));
                 }
             }
-            ManifestUpdate::Daily => bail!("daily manifest update not yet implemented"),
+            ManifestUpdate::Daily => {
+                if let Some(content) = read_file_if_fresh(&vsman_latest_path)? {
+                    return Ok((vsman_latest_path, content));
+                }
+            }
             ManifestUpdate::Always => {}
         }
     }
@@ -199,7 +230,7 @@ pub async fn read_vs_manifest(
     let (chman_path, chman_content) =
         read_ch_manifest(client, msvcup_dir, channel_kind, update).await?;
 
-    // Re-acquire lock and check again
+    // Re-acquire lock and check again (another process may have refreshed)
     {
         let _lock = LockFile::lock(vsman_lock_path.to_str().unwrap())?;
         match update {
@@ -208,10 +239,12 @@ pub async fn read_vs_manifest(
                     return Ok((vsman_latest_path, content));
                 }
             }
-            ManifestUpdate::Daily => bail!("daily manifest update not yet implemented"),
-            ManifestUpdate::Always => {
-                // TODO: check if updated
+            ManifestUpdate::Daily => {
+                if let Some(content) = read_file_if_fresh(&vsman_latest_path)? {
+                    return Ok((vsman_latest_path, content));
+                }
             }
+            ManifestUpdate::Always => {}
         }
 
         // Parse channel manifest to find VS manifest URL
@@ -244,7 +277,11 @@ async fn read_ch_manifest(
                     return Ok((chman_latest_path, content));
                 }
             }
-            ManifestUpdate::Daily => bail!("daily manifest update not yet implemented"),
+            ManifestUpdate::Daily => {
+                if let Some(content) = read_file_if_fresh(&chman_latest_path)? {
+                    return Ok((chman_latest_path, content));
+                }
+            }
             ManifestUpdate::Always => {}
         }
     }
@@ -261,7 +298,11 @@ async fn read_ch_manifest(
                     return Ok((chman_latest_path, content));
                 }
             }
-            ManifestUpdate::Daily => bail!("daily manifest update not yet implemented"),
+            ManifestUpdate::Daily => {
+                if let Some(content) = read_file_if_fresh(&chman_latest_path)? {
+                    return Ok((chman_latest_path, content));
+                }
+            }
             ManifestUpdate::Always => {}
         }
 
@@ -291,7 +332,11 @@ async fn resolve_ch_manifest_url(
                 return Ok((url_path, content));
             }
         }
-        ManifestUpdate::Daily => bail!("daily manifest update not yet implemented"),
+        ManifestUpdate::Daily => {
+            if let Some(content) = read_file_if_fresh(&url_path)? {
+                return Ok((url_path, content));
+            }
+        }
         ManifestUpdate::Always => {}
     }
 
@@ -356,4 +401,90 @@ fn vs_manifest_payload_from_ch_manifest(
         chman_path.display(),
         vs_manifest_id
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_file_opt_nonexistent() {
+        let result = read_file_opt(Path::new("/nonexistent/file")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_file_opt_existing() {
+        let dir = std::env::temp_dir().join("msvcup_test_read_file_opt");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.txt");
+        std::fs::write(&path, "hello").unwrap();
+
+        let result = read_file_opt(&path).unwrap();
+        assert_eq!(result.as_deref(), Some("hello"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_file_if_fresh_nonexistent() {
+        let result = read_file_if_fresh(Path::new("/nonexistent/file")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_file_if_fresh_recent_file() {
+        let dir = std::env::temp_dir().join("msvcup_test_fresh");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fresh.txt");
+        std::fs::write(&path, "content").unwrap();
+
+        // Just-written file should be fresh
+        let result = read_file_if_fresh(&path).unwrap();
+        assert_eq!(result.as_deref(), Some("content"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_file_if_fresh_stale_file() {
+        let dir = std::env::temp_dir().join("msvcup_test_stale");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stale.txt");
+        std::fs::write(&path, "old content").unwrap();
+
+        // Set modification time to 25 hours ago
+        let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 60 * 60);
+        let filetime = filetime::FileTime::from_system_time(old_time);
+        filetime::set_file_mtime(&path, filetime).unwrap();
+
+        let result = read_file_if_fresh(&path).unwrap();
+        assert!(result.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn msvcup_dir_with_path() {
+        let dir = MsvcupDir::with_path(PathBuf::from("/test/dir"));
+        assert_eq!(dir.root_path, PathBuf::from("/test/dir"));
+    }
+
+    #[test]
+    fn msvcup_dir_path_joins() {
+        let dir = MsvcupDir::with_path(PathBuf::from("/root"));
+        assert_eq!(
+            dir.path(&["manifest", "vs-release", "latest"]),
+            PathBuf::from("/root/manifest/vs-release/latest")
+        );
+    }
+
+    #[test]
+    fn msvcup_dir_path_empty() {
+        let dir = MsvcupDir::with_path(PathBuf::from("/root"));
+        assert_eq!(dir.path(&[]), PathBuf::from("/root"));
+    }
 }
