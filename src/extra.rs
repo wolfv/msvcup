@@ -1,3 +1,8 @@
+//! URL parsing for standalone packages (Ninja, CMake).
+//!
+//! These packages are distributed as standalone downloads rather than through
+//! the MSI-based Visual Studio installer, so their URLs need special handling.
+
 use crate::arch::Arch;
 
 pub enum ParseUrlResult {

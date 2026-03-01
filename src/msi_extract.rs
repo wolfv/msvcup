@@ -1,3 +1,9 @@
+//! MSI and CAB archive extraction.
+//!
+//! Reads MSI database tables (Directory, Component, File, Media) to determine
+//! the filesystem layout, then extracts files from embedded CAB archives into
+//! the target directory.
+
 use anyhow::{Context, Result};
 use fs_err as fs;
 use std::collections::HashMap;

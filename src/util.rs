@@ -1,3 +1,8 @@
+//! Shared utility functions.
+//!
+//! Version string parsing and comparison, sorted insertion, URL basename
+//! extraction, percent-decoding, and atomic file writing.
+
 use anyhow::Result;
 use std::cmp::Ordering;
 use std::path::Path;

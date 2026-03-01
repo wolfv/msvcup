@@ -1,5 +1,11 @@
+//! Target architecture types.
+//!
+//! Represents the CPU architectures supported by the MSVC toolchain:
+//! x64, x86, arm, and arm64.
+
 use std::fmt;
 
+/// A target CPU architecture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Arch {
     X64,
