@@ -1,3 +1,9 @@
+//! Package installation pipeline.
+//!
+//! Orchestrates the full install flow: lock file resolution, concurrent downloading
+//! of payloads with SHA256 verification, concurrent extraction of MSI/ZIP archives,
+//! and generation of vcvars scripts and environment JSON files.
+
 use crate::arch::Arch;
 use crate::lock_file::LockFile;
 use crate::lockfile_parse::{

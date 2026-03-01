@@ -1,3 +1,9 @@
+//! Lock file parsing and validation.
+//!
+//! Lock files are JSON files that store resolved download URLs and SHA256
+//! checksums for every package component. They enable reproducible installs
+//! independent of the current VS manifest state.
+
 use crate::packages::{MsvcupPackage, MsvcupPackageKind};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

@@ -1,0 +1,125 @@
+name: E2E Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  e2e-install:
+    name: "E2E: install and compile"
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build msvcup
+        run: cargo build --release
+
+      - name: List available packages
+        run: ./target/release/msvcup.exe list
+
+      - name: Install MSVC and SDK
+        run: |
+          ./target/release/msvcup.exe install `
+            --lock-file e2e-test.lock `
+            --manifest-update always `
+            --install-dir ${{ runner.temp }}\msvcup `
+            msvc-14.44.17.14 sdk-10.0.22621.7
+
+      - name: Verify installation directories exist
+        run: |
+          Test-Path "${{ runner.temp }}\msvcup\msvc-14.44.17.14" | Should -Be $true
+          Test-Path "${{ runner.temp }}\msvcup\sdk-10.0.22621.7" | Should -Be $true
+        shell: pwsh
+
+      - name: Compile and link a C program
+        shell: cmd
+        run: |
+          call "${{ runner.temp }}\msvcup\msvc-14.44.17.14\vcvars-x64.bat"
+          call "${{ runner.temp }}\msvcup\sdk-10.0.22621.7\vcvars-x64.bat"
+          echo #include ^<stdio.h^> > test.c
+          echo int main(void) { printf("Hello from msvcup E2E test!\n"); return 0; } >> test.c
+          cl.exe test.c /Fe:test.exe /nologo
+          test.exe
+
+      - name: Compile a C++ program
+        shell: cmd
+        run: |
+          call "${{ runner.temp }}\msvcup\msvc-14.44.17.14\vcvars-x64.bat"
+          call "${{ runner.temp }}\msvcup\sdk-10.0.22621.7\vcvars-x64.bat"
+          echo #include ^<iostream^> > test.cpp
+          echo int main() { std::cout ^<^< "Hello C++ from msvcup!" ^<^< std::endl; return 0; } >> test.cpp
+          cl.exe /EHsc test.cpp /Fe:test_cpp.exe /nologo
+          test_cpp.exe
+
+      - name: Verify lock file was created
+        run: |
+          if (!(Test-Path "e2e-test.lock")) { throw "Lock file not created" }
+          $content = Get-Content "e2e-test.lock" -Raw
+          if ($content.Length -lt 100) { throw "Lock file appears empty or too small" }
+          Write-Host "Lock file size: $($content.Length) bytes"
+        shell: pwsh
+
+  e2e-resolve:
+    name: "E2E: resolve and autoenv"
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build msvcup
+        run: cargo build --release
+
+      - name: Create msvcup.toml config
+        shell: pwsh
+        run: |
+          @"
+          [msvcup]
+          lock_file = "msvcup.lock"
+          target_arch = "x64"
+          install_dir = "$($env:RUNNER_TEMP -replace '\\', '\\\\')\msvcup"
+
+          [packages]
+          msvc = "14.44.17.14"
+          sdk = "10.0.22621.7"
+          "@ | Out-File -FilePath msvcup.toml -Encoding UTF8
+
+      - name: Resolve packages (creates shim directory)
+        run: |
+          ./target/release/msvcup.exe resolve `
+            --config msvcup.toml `
+            --out-dir ${{ runner.temp }}\autoenv `
+            --manifest-update always
+
+      - name: Verify resolve output
+        shell: pwsh
+        run: |
+          $dir = "${{ runner.temp }}\autoenv"
+          # Check shim executables were created
+          foreach ($exe in @("cl.exe", "link.exe", "lib.exe", "rc.exe", "mt.exe")) {
+            if (!(Test-Path "$dir\$exe")) { throw "Missing shim: $exe" }
+          }
+          # Check config and lock file were copied
+          if (!(Test-Path "$dir\msvcup.toml")) { throw "Missing msvcup.toml" }
+          if (!(Test-Path "$dir\msvcup.lock")) { throw "Missing lock file" }
+          # Check toolchain.cmake was generated
+          if (!(Test-Path "$dir\toolchain.cmake")) { throw "Missing toolchain.cmake" }
+          Write-Host "All resolve artifacts verified"
+
+      - name: Install via autoenv
+        run: |
+          & "${{ runner.temp }}\autoenv\msvcup-autoenv.exe" install
+
+      - name: Compile with autoenv shims
+        shell: cmd
+        run: |
+          echo #include ^<stdio.h^> > test.c
+          echo int main(void) { printf("Hello from autoenv!\n"); return 0; } >> test.c
+          "%RUNNER_TEMP%\autoenv\cl.exe" test.c /Fe:test.exe /nologo
+          test.exe

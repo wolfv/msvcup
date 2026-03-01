@@ -1,3 +1,10 @@
+//! Package identification and manifest parsing.
+//!
+//! This module parses the Visual Studio channel manifest JSON into structured
+//! package and payload data. It identifies which manifest entries correspond to
+//! msvcup package types (MSVC, SDK, MSBuild, etc.) and provides the data needed
+//! to download and install them.
+
 use crate::arch::Arch;
 use crate::sha::Sha256;
 use crate::util::{
@@ -8,6 +15,7 @@ use anyhow::{Context, Result};
 use std::cmp::Ordering;
 use std::fmt;
 
+/// The type of an msvcup package.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MsvcupPackageKind {
     Msvc,
@@ -59,6 +67,7 @@ impl fmt::Display for MsvcupPackageKind {
     }
 }
 
+/// A user-facing package identifier like `msvc-14.44.17.14` or `sdk-10.0.22621.7`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MsvcupPackage {
     pub kind: MsvcupPackageKind,

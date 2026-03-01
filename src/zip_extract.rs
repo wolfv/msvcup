@@ -1,3 +1,9 @@
+//! ZIP and VSIX archive extraction.
+//!
+//! Extracts ZIP files (including VSIX packages, which are ZIP files with a
+//! specific directory structure). Handles root directory stripping, VSIX prefix
+//! removal, percent-encoded filenames, and path traversal prevention.
+
 use anyhow::{Context, Result};
 use fs_err as fs;
 use std::io::{self, Write};

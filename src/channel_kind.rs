@@ -1,3 +1,8 @@
+//! Visual Studio release channel selection.
+//!
+//! Supports Release and Preview channels, each with its own manifest URL.
+
+/// The Visual Studio release channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum ChannelKind {

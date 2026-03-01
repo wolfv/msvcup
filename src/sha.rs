@@ -1,3 +1,8 @@
+//! SHA256 hashing utilities.
+//!
+//! Provides both one-shot hashing ([`Sha256`]) and incremental/streaming
+//! hashing ([`Sha256Streaming`]) for verifying downloaded file integrity.
+
 use sha2::{Digest, Sha256 as Sha256Hasher};
 use std::fmt;
 
